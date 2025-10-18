@@ -25,4 +25,4 @@ You can always run
 ```bash
 python ex1.py --help
 ```
-to getmore information.
+to get more information.

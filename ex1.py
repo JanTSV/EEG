@@ -3,6 +3,8 @@ import click
 from pathlib import Path
 from mne_bids import (BIDSPath,read_raw_bids)
 from ccs_eeg_utils import read_annotations_core
+from matplotlib import pyplot as plt
+import numpy as np
 
 # import ccs_eeg_utils.py
 sys.path.insert(0, '.')
@@ -17,9 +19,25 @@ def main(bids):
 
     # read the file
     raw = read_raw_bids(bids_path)
+    print(raw.info)
 
     # fix the annotations readin
-    read_annotations_core(bids_path,raw)
+    read_annotations_core(bids_path, raw)
+
+    # https://mne.tools/stable/generated/mne.Info.html -> sfreq is the sampling frequency
+    print(f"Sampling frequency: {raw.info['sfreq']} Hz")
+
+    # https://mne.tools/stable/generated/mne.io.Raw.html -> raw data is in SI units, so EEG uses volts
+    data, times = raw[10, :]
+    data = data * 1e6
+    print(f"min-y: {np.min(data):.2f} µV, max-y: {np.max(data):.2f} µV")
+
+    # plot the 10th channel over the whole recorded time
+    plt.plot(times, data[0])  # take the first row of `data`
+    plt.xlabel("Time (s)")
+    plt.ylabel("EEG (µV)")
+    plt.title("10th channel EEG")
+    plt.show()
 
 if __name__ == "__main__":
     main()
