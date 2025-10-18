@@ -11,7 +11,8 @@ sys.path.insert(0, '.')
 
 @click.command()
 @click.option("--bids", required=True, type=click.Path(exists=True, file_okay=False, path_type=Path), help="Path to bids/ dir.")
-def main(bids):
+@click.option("--channel", required=False, type=int, default=10, help="EEG channel that should be analyzed.")
+def main(bids, channel):
     subject_id = '030'
     
     # Path to data set and its format
@@ -28,7 +29,7 @@ def main(bids):
     print(f"Sampling frequency: {raw.info['sfreq']} Hz")
 
     # https://mne.tools/stable/generated/mne.io.Raw.html -> raw data is in SI units, so EEG uses volts
-    data, times = raw[10, :]
+    data, times = raw[channel, :]
     data = data * 1e6
     print(f"min-y: {np.min(data):.2f} µV, max-y: {np.max(data):.2f} µV")
 
@@ -36,7 +37,7 @@ def main(bids):
     plt.plot(times, data[0])  # take the first row of `data`
     plt.xlabel("Time (s)")
     plt.ylabel("EEG (µV)")
-    plt.title("10th channel EEG")
+    plt.title(f"Channel {channel} EEG")
     plt.show()
 
 if __name__ == "__main__":
