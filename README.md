@@ -26,6 +26,15 @@ EEG/
                 │  sub-01_task-RPS_eeg.json
                 │  sub-01_task-RPS_events.json
                 │  sub-01_task-RPS_events.tsv
+└─originalCode/
+    │  step1_preprocessing.m
+    │  step2a_decoding.m
+    │  step2b_markovchain.m
+    │  step3a_plot_Fig1.m
+    │  step3b_plot_Fig2_Fig3.m
+    └─helperFiles/
+        │  bayesfactor_R_wrapper.m
+        |  biosemi64.mat
 ```
 
 
