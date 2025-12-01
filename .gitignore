@@ -1,5 +1,6 @@
 # data
 data/example_data
+data/sub-31
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
