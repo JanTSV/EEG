@@ -1,0 +1,46 @@
+# ===== PATHS =====
+paths:
+  input_file: "../data/derivatives/pair-01_player-1_task-RPS_eeg-epo.fif"
+  results_dir: "../data/derivatives/decoding_results"
+
+# ===== EXPERIMENT SETTINGS =====
+experiment:
+  # If true, the script creates fake labels (Class 0 vs 1) if only 1 class is found.
+  # Set to 'false' once you have real 'Rock/Paper/Scissors' events.
+  allow_dummy_data: true
+  
+  # Cross-Validation Folds
+  n_folds: 5
+  
+  # Random seed for reproducibility
+  random_state: 42
+
+# ===== MODELS =====
+# You can enable/disable specific models here.
+
+models:
+  # 1. Linear Discriminant Analysis (Sliding Window)
+  # Focus: Temporal dynamics ("WHEN?")
+  lda:
+    enabled: true
+    solver: "lsqr"
+    shrinkage: "auto"  # recommended for EEG
+    metric: "accuracy"
+
+  # 2. Logistic Regression (Whole Trial Vectorized)
+  # Focus: Robust Baseline ("HOW GOOD overall?")
+  log_reg:
+    enabled: true
+    C: 1.0  # Regularization strength
+    max_iter: 1000
+
+  # 3. Neural Network (Multi-Layer Perceptron)
+  # Focus: Non-linear patterns
+  # Note: Uses sklearn MLPClassifier to keep dependencies simple.
+  mlp:
+    enabled: true
+    hidden_layer_sizes: [100, 50] # 2 Hidden Layers
+    activation: "relu"
+    solver: "adam"
+    alpha: 0.0001 # L2 penalty
+    max_iter: 500

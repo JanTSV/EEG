@@ -1,0 +1,42 @@
+# ===== PATHS =====
+# Relative paths are resolved from the config file's directory.
+paths:
+  # Input file: The result from the preprocessing step
+  input_file: "../data/derivatives/pair-01_player-1_task-RPS_eeg-epo.fif"
+  # Output directory for saving the plot images
+  figures_dir: "../data/derivatives/figures"
+
+# ===== PLOTTING CONFIGURATION =====
+plot:
+  # Title of the plot
+  title: "ERP Analysis: Subject 1 (Grand Average)"
+  
+  # CHANNEL SELECTION:
+  # Set this to "eeg" to plot ALL channels (Butterfly Plot).
+  # Or provide a list like ["Fz", "Cz", "Pz"] for single channel views.
+  # picks: ["Fz", "Cz", "Pz", "Oz"]
+  picks: "eeg"
+  
+  # TIME WINDOW (Cropping):
+  # Zoom in on the relevant ERP components (e.g., P300).
+  # tmin/tmax: null means "take everything available".
+  # Recommended for ERPs: tmin: -0.2, tmax: 1.0
+  crop: 
+    tmin: -0.2
+    tmax: 1.0
+
+  # CONDITIONS:
+  # Currently, we only have "decision". Later, this could be ["Win", "Loss"].
+  conditions: ["decision"]
+
+  # STYLING & STATISTICS:
+  # Show a small head map with sensor positions
+  show_sensors: true
+  
+  # Variability mode for the plot:
+  # "mean" = show only the average line (cleaner for butterfly plots).
+  # "std" or "sem" = show standard deviation/error as a shadow (better for single channels).
+  variability_mode: "mean"  
+
+  # Should the plot open in an interactive window?
+  interactive: true

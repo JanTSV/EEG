@@ -116,6 +116,44 @@ uv run python code/compare_preprocessing.py --pair 1 --player 1 --channels Fz Cz
 
 Use this to validate that preprocessing improves signal quality without distorting neural responses.
 
+## ERP Visualization
+
+Generate publication-ready ERP plots (Joint Plots and ROI Traces) based on the preprocessed data.
+
+```bash
+# Run plotting pipeline
+uv run code/plot_results.py
+```
+
+## Configuration (code/plot_config.yaml)
+
+- **Time Window:**  
+  Crop data to relevant components (e.g., `-0.2` to `1.0` s).
+
+- **Channel Selection:**  
+  Set `picks`: `"eeg"` for a butterfly plot (all channels) or a list `["Fz", "Pz"]` for specific traces.
+
+- **Variability:**  
+  Toggle between `mean` (clean line) or `sem` (standard error shadow).
+
+- **Output:**  
+  Figures saved to `data/derivatives/figures/` (e.g., `erp_joint_plot.png`).
+
+---
+
+## Decoding Analysis
+
+Run multivariate pattern analysis (MVPA) to decode decision-making processes from EEG signals.  
+The pipeline supports multiple models and handles dummy data generation for testing technical workflows.
+
+### Bash
+
+```bash
+# Run advanced decoding pipeline
+uv run code/advanced_decoding.py
+
+
+
 ## Troubleshooting
 
 **All epochs dropped:**
