@@ -151,7 +151,7 @@ The pipeline supports multiple models and handles dummy data generation for test
 ```bash
 # Run advanced decoding pipeline
 uv run code/advanced_decoding.py
-
+```
 
 
 ## Troubleshooting
