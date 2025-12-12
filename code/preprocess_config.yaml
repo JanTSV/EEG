@@ -1,0 +1,93 @@
+# ===== PATHS =====
+# File paths for raw data, events, and output. Supports templating with {pair:02d} and {player}.
+# Relative paths are resolved from the config file's directory.
+paths:
+  participants_tsv: "../data/participants.tsv" # Demographics and bad channel list (TSV format)
+  events_template: "../data/sub-{pair:02d}/eeg/sub-{pair:02d}_task-RPS_events.tsv" # Event markers (sample indices, labels)
+  raw_template: "../data/sub-{pair:02d}/eeg/sub-{pair:02d}_task-RPS_eeg.bdf" # Raw EEG data (BioSemi format)
+  derivatives_dir: "../data/derivatives" # Output directory for preprocessed epochs (FIF files)
+  output_pattern: "pair-{pair:02d}_player-{player}_task-RPS_eeg-epo.fif" # Filename pattern for epochs
+  plot_raw_path: null # Set to raw BDF path to enable visualization; leave null to skip
+# ===== PROCESSING =====
+processing:
+  # ===== INSPECTION & QUALITY CONTROL =====
+  identify_bad_channels: false # Open interactive plot to manually mark bad channels (may contain noise/artifact)
+  interpolate_bad_channels: false # Interpolate bad channels using spherical spline (alternative: discard them)
+  plot_data: false # Plot raw data for visual inspection (requires plot_raw_path set above)
+
+  # ===== DOWNSAMPLING =====
+  down_sample: true # Resample from 2048 Hz to lower rate (reduces file size ~8x)
+  downsample_rate_hz: 256.0 # Target rate; 256 Hz sufficient for ERP analysis (captures components up to ~100 Hz)
+
+  # ===== FILTERING FOR VISUALIZATION =====
+  inspect_filter_low_hz: 0.1 # High-pass cutoff for visual inspection (helps see faster components)
+  inspect_filter_high_hz: 100.0 # Low-pass cutoff for visual inspection (removes very high freq noise)
+
+  # ===== MAIN SIGNAL PROCESSING FILTER =====
+  output_filter_enabled: true # Apply band-pass filter to clean signal (removes drift and noise)
+  output_filter_low_hz: 0.1 # High-pass cutoff (removes slow DC drift; 0.1 Hz typical for ERPs)
+  output_filter_high_hz: 100.0 # Low-pass cutoff (removes high-frequency noise; 100 Hz typical)
+  output_filter_method: fir # FIR=linear phase (preserves timing), IIR=faster but phase-distorts
+
+  # ===== LINE NOISE REMOVAL =====
+  notch_filter_enabled: true # Remove 50/60 Hz AC mains hum (widespread in recordings)
+  notch_freq_hz: 50.0 # Center frequency (50 Hz in EU/AU, 60 Hz in US)
+  notch_width_hz: 1.0 # Width of band-stop (default ±1 Hz sufficient for most cases)
+
+  # ===== BASELINE CORRECTION =====
+  baseline_window_sec: [-0.2, 0.0] # Time window (sec) to compute baseline: pre-stimulus period
+  # Subtracts mean voltage from this window (removes DC offsets, makes neural deflections interpretable)
+
+  # ===== RE-REFERENCING =====
+  reref_to_average: true # Re-reference to average of all channels (neutral baseline for group analysis)
+  # BioSemi records with active reference; average reference is standard for ERPs
+
+  # ===== ARTIFACT REMOVAL: ICA =====
+  ica_enabled: false # Enable Independent Component Analysis to separate brain from artifacts
+  ica_n_components: 20 # Number of components (typical 15-25 for 64-channel; more = slower)
+  ica_method: fastica # fastICA: fast, deterministic; picard: slower, more stable
+  ica_random_state: 42 # Seed for reproducibility (fastICA has random initialization)
+
+  # ===== ARTIFACT REMOVAL: AMPLITUDE REJECTION =====
+  amplitude_reject_enabled: false # Flag epochs with abnormally high peak-to-peak voltage
+  amplitude_reject_threshold_uv: 200.0 # Threshold in µV (typical EEG 200-500 µV; 100 too strict)
+  # Use AFTER ICA to remove remaining muscle/electrode artifacts; disable if too aggressive
+
+  # ===== CHANNEL SETUP =====
+  montage: "biosemi64" # Standard electrode position template (enables 3D visualization, source localization)
+  expected_player_channels: 64 # Expected channels per player (validity check)
+
+  # ===== EVENT SPECIFICATION =====
+  event_id_label: "decision" # Event label/name
+  event_id_code: 1 # Event ID code in MNE (integer)
+
+  # ===== DETRENDING & BASELINE (LEGACY) =====
+  baseline: null # If not null, overrides baseline_window_sec; usually leave as null
+  detrend: null # Detrending method ('constant', 'linear', or null=none); null typical for ERPs
+# ===== DATA SPECIFICATION =====
+data:
+  num_trials: 480 # Expected trials per subject (all subjects have ~480 RPS trials)
+  pair_ranges: # Define which pair IDs to process (inclusive range pairs)
+    - [1, 9] # Pairs 1-9
+    - [11, 22] # Pairs 11-22 (note: pair 10, 23-24 missing/corrupted)
+    - [25, 34] # Pairs 25-34
+  target_pairs: [01] # Which pairs to actually process (subset of ranges above for testing/debugging)
+# ===== TIMING & SAMPLING =====
+timing:
+  fs_hz: 2048 # Original sampling rate (BioSemi 2048 Hz; don't change)
+  prestim_sec: 0.2 # Pre-stimulus window length (200 ms baseline before event)
+  poststim_sec: 5.0 # Post-stimulus window length (5 sec after event; captures decision + response)
+# ===== BAD CHANNELS SPECIFICATION =====
+# Column indices in participants.tsv where bad channel lists are stored (comma-separated channel names)
+bad_channels:
+  player1_column_index: 6 # Column index for player 1 bad channels in participants.tsv
+  player2_column_index: 11 # Column index for player 2 bad channels in participants.tsv
+# ===== CHANNEL SELECTION =====
+# Pattern matching to select player-specific channels from dual-player recordings
+# (raw BDF contains both players' channels mixed; extract by partial string matching)
+channel_masks:
+  player1_includes: ["2-A", "2-B"] # Channel name patterns for player 1 (includes channels containing "2-A" or "2-B")
+  player2_includes: ["1-A", "1-B"] # Channel name patterns for player 2 (includes channels containing "1-A" or "1-B")
+# ===== PLOTTING =====
+plot:
+  theme: "light" # Matplotlib theme for visualization ("light" or "dark")

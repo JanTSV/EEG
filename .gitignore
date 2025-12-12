@@ -2,6 +2,7 @@
 data/example_data
 data/sub-31
 data/derivatives
+data/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
