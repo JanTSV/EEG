@@ -143,15 +143,47 @@ uv run code/plot_results.py
 
 ## Decoding Analysis
 
-Run multivariate pattern analysis (MVPA) to decode decision-making processes from EEG signals.  
-The pipeline supports multiple models and handles dummy data generation for testing technical workflows.
+Run a comprehensive multivariate pattern analysis (MVPA) pipeline to decode decision-making processes. This module replicates the methodology of Moerel et al. (2025) (using LDA and time-binning) and extends it with modern Deep Learning approaches (PyTorch).
 
 ### Bash
 
 ```bash
 # Run advanced decoding pipeline
-uv run code/advanced_decoding.py
+uv run code/decoding.py
 ```
+
+### Key Features
+1. 4-Dimensional Decoding: Automatically loops through four prediction targets defined in the paper:
+   - Current Self: What did I play?
+   - Current Other: What did the opponent play?
+   - Previous Self: What did I play in the last round? (Memory/Strategy)
+   - Previous Other: What did the opponent play in the last round?
+2. Methodological Replication: Resamples data to 4 Hz (250 ms bins) to match the original study's signal-to-noise optimization.
+3. Model Zoo: Compare classical vs. deep learning models on the same data.
+   - LDA: Linear Discriminant Analysis (Paper standard).
+   - MLP: Multi-Layer Perceptron (Scikit-Learn).
+   - EEGNet_slidingWindow: A custom EEGNet-like architecture integrated into MNE.
+   - Logistic Regression: Whole-trial baseline.
+4. Statistical Evaluation: Performs time-point-by-time-point t-tests against chance level (33.3%) and marks significant clusters in plots
+
+### Configuraion (code/decoding_config.yaml)
+- Experiment Targets: Define the columns to decode and trial shifts (e.g., shift: 1 for previous trial).
+    ```yaml
+    targets:
+      previous_self:
+        column: "player1_resp"
+        shift: 1  # Decodes trial N-1
+    ```
+- Models: Enable/Disable specific classifiers (e.g., set pytorch_net: enabled: true).
+- Statistics: Set alpha (default 0.05) and chance_level (0.33).
+
+### Output
+Results are saved in data/derivatives/decoding_results/, organized by target (e.g., current_self/):
+- comparison_plot.png: Overlay of all active models with shaded standard deviation.
+- result_{model}.png: Individual model performance with significant time points marked (black dots).
+- evaluation_report.csv: Raw accuracy, standard deviation, and p-values for every time point.
+
+  Note: If real labels are missing (e.g., during testing), the pipeline automatically detects this and falls back to Dummy Data generation, tagging all outputs with DUMMY_ prefixes to prevent confusion.
 
 
 ## Troubleshooting

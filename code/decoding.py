@@ -1,192 +1,328 @@
 # ----- SKETCH -----
 # Decoding Pipeline
-# 1. Setup: Load Config & Data
-# 2. Pre-Check: Handle Labels (Real vs. Dummy)
-# 3. Model Zoo: Define pipelines for LDA, LogReg, and MLP (NN)
-# 4. Execution Loop: Run enabled models
-# 5. Reporting: Save CSV metrics and PNG plots for each model
+# 1. Setup & Data Loading
+# 2. TARGET LOOP: Iterate over Current/Previous Self/Other
+# 3. Data Matching with "Shift" logic (for previous trials)
+# 4. Training & Stats
+# 5. Save results in subfolders
 
-# ----- IMPORTS -----
 import mne
 import numpy as np
 import pandas as pd
-from pathlib import Path
-from typing import Optional, Union
 import matplotlib.pyplot as plt
+from pathlib import Path
 import yaml
-import json
 import warnings
+from scipy.stats import ttest_1samp
+import shutil
 
-# Sklearn / Machine Learning
+# Machine Learning
+from sklearn.base import BaseEstimator, ClassifierMixin
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
 from sklearn.linear_model import LogisticRegression
 from sklearn.neural_network import MLPClassifier
-from sklearn.model_selection import cross_val_score, StratifiedKFold
-from mne.decoding import SlidingEstimator, Vectorizer
+from sklearn.model_selection import StratifiedKFold, cross_val_score
+from mne.decoding import SlidingEstimator, Vectorizer, cross_val_multiscore
 
-# Ignore some MNE warnings for cleaner output
-warnings.filterwarnings("ignore", category=RuntimeWarning) 
+# PyTorch
+import torch
+import torch.nn as nn
+import torch.optim as optim
 
-# ----- HELPER FUNCTIONS -----
+warnings.filterwarnings("ignore")
 
-def load_config(config_path: Optional[Union[str, Path]] = None) -> tuple[dict, Path]:
-    default_path = Path(__file__).resolve().parent / "decoding_config.yaml"
-    cfg_path = Path(config_path) if config_path else default_path
-    
-    if not cfg_path.exists():
-        raise FileNotFoundError(f"Config not found at {cfg_path}")
+# --- CONFIG LOADER ---
+def load_config():
+    base_dir = Path(__file__).resolve().parent.parent 
+    cfg_path = Path(__file__).resolve().parent / "decoding_config.yaml"
+    with cfg_path.open("r") as f:
+        return yaml.safe_load(f), base_dir
+
+def resolve_path(path_str, base):
+    p = Path(path_str)
+    return p if p.is_absolute() else (base / p).resolve()
+
+# --- PYTORCH MODEL WRAPPER ---
+class SimpleEEGNet(nn.Module):
+    def __init__(self, input_dim, hidden_dim, n_classes):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(0.2),
+            nn.Linear(hidden_dim, n_classes)
+        )
+    def forward(self, x):
+        return self.net(x)
+
+class PyTorchEstimator(BaseEstimator, ClassifierMixin):
+    def __init__(self, hidden_dim=64, lr=0.001, epochs=10, batch_size=32):
+        self.hidden_dim = hidden_dim
+        self.lr = lr
+        self.epochs = epochs
+        self.batch_size = batch_size
+        self.model_ = None
+        self.classes_ = None
+
+    def fit(self, X, y):
+        self.classes_ = np.unique(y)
+        input_dim = X.shape[1]
+        n_classes = len(self.classes_)
         
-    with cfg_path.open("r", encoding="utf-8") as f:
-        return yaml.safe_load(f), cfg_path
+        X_t = torch.FloatTensor(X)
+        y_t = torch.LongTensor(y)
+        
+        self.model_ = SimpleEEGNet(input_dim, self.hidden_dim, n_classes)
+        optimizer = optim.Adam(self.model_.parameters(), lr=self.lr)
+        criterion = nn.CrossEntropyLoss()
+        
+        dataset = torch.utils.data.TensorDataset(X_t, y_t)
+        loader = torch.utils.data.DataLoader(dataset, batch_size=self.batch_size, shuffle=True)
+        
+        self.model_.train()
+        for _ in range(self.epochs):
+            for xb, yb in loader:
+                optimizer.zero_grad()
+                outputs = self.model_(xb)
+                loss = criterion(outputs, yb)
+                loss.backward()
+                optimizer.step()
+        return self
 
-def prepare_data(epochs, cfg):
-    """Handles label extraction and dummy data generation."""
-    events = epochs.events
-    y = events[:, 2]
+    def predict(self, X):
+        self.model_.eval()
+        with torch.no_grad():
+            X_t = torch.FloatTensor(X)
+            outputs = self.model_(X_t)
+            _, predicted = torch.max(outputs.data, 1)
+        return predicted.numpy()
+
+    def score(self, X, y):
+        preds = self.predict(X)
+        return np.mean(preds == y)
+
+# --- DATA PREP (With Shift Logic) ---
+def prepare_data(epochs, cfg, base_dir, target_name, target_config):
+    """
+    Loads behavioral labels and aligns them with EEG.
+    Handles 'shift' for previous trial decoding.
+    """
+    # 1. Load TSV
+    tsv_path = resolve_path(cfg["paths"]["events_file"], base_dir)
+    is_dummy = False
     
-    classes = np.unique(y)
-    n_classes = len(classes)
-    
-    print(f"  > Found {n_classes} classes: {classes}")
-    
-    # DUMMY DATA LOGIC
-    if n_classes < 2:
+    if not tsv_path.exists():
         if cfg["experiment"]["allow_dummy_data"]:
-            print("  ! WARNING: Only 1 class found. Generating DUMMY labels (Split 50/50).")
-            print("  ! NOTE: Results show temporal drift, not classification!")
-            n_trials = len(y)
-            # Create fake labels: 0 for first half, 1 for second half
-            y_dummy = np.zeros(n_trials)
-            y_dummy[n_trials//2:] = 1
-            return epochs.get_data(), y_dummy
+             print("    ! Events file missing. Using DUMMY data.")
+             y = np.zeros(len(epochs))
+             y[len(epochs)//2:] = 1
+             return epochs.get_data(), y, epochs.times, True
+        raise FileNotFoundError(f"Missing: {tsv_path}")
+    
+    events_df = pd.read_csv(tsv_path, sep='\t')
+    
+    # Trim if needed
+    if len(epochs) != len(events_df):
+        min_len = min(len(epochs), len(events_df))
+        events_df = events_df.iloc[:min_len]
+        epochs = epochs[:min_len]
+
+    # 2. Extract and Shift Labels
+    col_name = target_config["column"]
+    shift = target_config.get("shift", 0)
+    
+    # Get raw values
+    y_raw = events_df[col_name].values.astype(float)
+    
+    # Apply Shift (e.g., for "previous_self")
+    if shift > 0:
+        # Shift array to right (introduce NaNs at start)
+        y_raw = np.roll(y_raw, shift)
+        # Set first 'shift' elements to NaN (as they have no history)
+        y_raw[:shift] = np.nan
+        
+    # 3. Filter Invalid Labels (NaNs from shift or missing responses)
+    # Valid = Not NaN AND Not 0 (assuming 0 is 'no response')
+    valid_mask = (~np.isnan(y_raw)) & (y_raw > 0)
+    
+    epochs_clean = epochs[valid_mask]
+    y_clean = y_raw[valid_mask]
+    
+    # 4. Remap Classes (to 0, 1, 2)
+    unique_classes = np.unique(y_clean)
+    
+    if len(unique_classes) < 2:
+        if cfg["experiment"]["allow_dummy_data"]:
+            print("    ! Not enough classes. Using DUMMY data.")
+            y_clean = np.zeros(len(epochs_clean))
+            y_clean[len(epochs_clean)//2:] = 1
+            is_dummy = True
         else:
-            raise ValueError("Not enough classes for decoding and dummy data is disabled.")
-            
-    return epochs.get_data(), y
+            raise ValueError(f"Not enough classes for {target_name}: {unique_classes}")
+    else:
+        class_map = {k: v for v, k in enumerate(unique_classes)}
+        y_clean = np.array([class_map[k] for k in y_clean])
 
-# ----- MODEL RUNNERS -----
+    print(f"    > Target: {target_name} | Shift: {shift} | Valid Trials: {len(y_clean)}")
+    return epochs_clean.get_data(), y_clean, epochs_clean.times, is_dummy
 
-def run_lda_time_resolved(X, y, cfg, out_dir, times):
-    """Model 1: Sliding Window LDA"""
-    print("\n[1/3] Running LDA (Time-Resolved)...")
+# --- STATS ---
+def calculate_stats(model_name, scores, times, chance_level, alpha=0.05):
+    n_folds, n_times = scores.shape
+    p_values = []
+    for t in range(n_times):
+        t_stat, p_val = ttest_1samp(scores[:, t], chance_level)
+        p_values.append(p_val)
     
-    model_cfg = cfg["models"]["lda"]
-    cv = StratifiedKFold(n_splits=cfg["experiment"]["n_folds"])
+    p_values = np.array(p_values)
+    significant = p_values < alpha
     
-    clf = make_pipeline(
-        StandardScaler(),
-        LinearDiscriminantAnalysis(solver=model_cfg["solver"], shrinkage=model_cfg["shrinkage"])
-    )
+    return pd.DataFrame({
+        "time": times,
+        "model": model_name,
+        "mean_accuracy": np.mean(scores, axis=0),
+        "std_dev": np.std(scores, axis=0),
+        "p_value": p_values,
+        "significant": significant
+    })
+
+# --- PLOTTING ---
+def save_plots(all_results, times, cfg, out_dir, title_prefix=""):
+    chance = cfg["stats"]["chance_level"]
     
-    # The SlidingEstimator wraps the classifier to run on each time point
-    slider = SlidingEstimator(clf, scoring=model_cfg["metric"], n_jobs=-1, verbose=False)
-    
-    # Run Cross-Validation
-    scores = mne.decoding.cross_val_multiscore(slider, X, y, cv=cv, n_jobs=-1)
-    mean_scores = np.mean(scores, axis=0)
-    
-    # Save & Plot
-    np.save(out_dir / "lda_scores.npy", scores)
-    
-    fig, ax = plt.subplots(figsize=(10, 5))
-    ax.plot(times, mean_scores, label="LDA Accuracy")
-    ax.axhline(0.5, color='k', linestyle='--', label="Chance")
+    # Joint Plot
+    fig, ax = plt.subplots(figsize=(12, 6))
+    ax.axhline(chance, color='k', linestyle='--', label=f'Chance ({chance:.2f})')
     ax.axvline(0, color='r', linestyle=':')
-    ax.set_title("LDA: Time-Resolved Accuracy")
+    
+    for name, df in all_results.items():
+        color = cfg["plotting"]["colors"].get(name, "gray")
+        ax.plot(times, df["mean_accuracy"], label=name.upper(), color=color, linewidth=2)
+        if cfg["plotting"]["show_shadow"]:
+            ax.fill_between(times, 
+                            df["mean_accuracy"] - df["std_dev"]/2, 
+                            df["mean_accuracy"] + df["std_dev"]/2, 
+                            color=color, alpha=0.15)
+            
+    ax.set_title(f"Decoding: {title_prefix}")
     ax.set_xlabel("Time (s)")
     ax.set_ylabel("Accuracy")
-    ax.legend()
-    ax.grid(True)
+    ax.set_xlim(-0.2, 1.0)
+    ax.legend(loc="upper right")
+    ax.grid(True, alpha=0.3)
     
-    fig.savefig(out_dir / "plot_lda_time_course.png")
-    print(f"  -> Max Accuracy: {np.max(mean_scores):.2f} at {times[np.argmax(mean_scores)]:.2f}s")
+    fig.savefig(out_dir / "comparison_plot.png", dpi=300)
+    plt.close(fig) # Close to save memory
+    
+    # Individual Plots
+    for name, df in all_results.items():
+        fig, ax = plt.subplots(figsize=(10, 5))
+        color = cfg["plotting"]["colors"].get(name, "blue")
+        
+        ax.plot(times, df["mean_accuracy"], color=color, label="Accuracy")
+        ax.axhline(chance, color='k', linestyle='--')
+        ax.axvline(0, color='r', linestyle=':')
+        ax.fill_between(times, df["mean_accuracy"] - df["std_dev"], df["mean_accuracy"] + df["std_dev"], color=color, alpha=0.2)
+        
+        sig_times = df[df["significant"]]["time"]
+        if len(sig_times) > 0:
+            ax.scatter(sig_times, [chance - 0.02]*len(sig_times), marker='.', color='black', s=10)
 
-def run_logreg_whole_trial(X, y, cfg, out_dir):
-    """Model 2: Logistic Regression (Whole Trial)"""
-    print("\n[2/3] Running Logistic Regression (Whole Trial)...")
-    
-    model_cfg = cfg["models"]["log_reg"]
+        ax.set_title(f"{name.upper()} - {title_prefix}")
+        fig.savefig(out_dir / f"result_{name}.png")
+        plt.close(fig)
+
+# --- RUNNERS ---
+def run_models(X, y, times, cfg, out_dir, title_prefix):
     cv = StratifiedKFold(n_splits=cfg["experiment"]["n_folds"])
+    stats_collection = {}
     
-    # Vectorizer flattens (Channels x Time) into one long feature vector
-    clf = make_pipeline(
-        Vectorizer(),
-        StandardScaler(),
-        LogisticRegression(C=model_cfg["C"], max_iter=model_cfg["max_iter"])
-    )
-    
-    scores = cross_val_score(clf, X, y, cv=cv, n_jobs=-1)
-    
-    print(f"  -> Mean Accuracy: {np.mean(scores):.2%}")
-    
-    # Save simple text report
-    with open(out_dir / "logreg_results.txt", "w") as f:
-        f.write(f"Mean Accuracy: {np.mean(scores):.4f}\n")
-        f.write(f"Std Dev: {np.std(scores):.4f}\n")
-        f.write(f"Scores per fold: {scores}\n")
-
-def run_mlp_neural_net(X, y, cfg, out_dir):
-    """Model 3: Neural Network (MLP)"""
-    print("\n[3/3] Running Neural Network (MLP)...")
-    
-    model_cfg = cfg["models"]["mlp"]
-    cv = StratifiedKFold(n_splits=cfg["experiment"]["n_folds"])
-    
-    clf = make_pipeline(
-        Vectorizer(), # Flattens input
-        StandardScaler(),
-        MLPClassifier(
-            hidden_layer_sizes=tuple(model_cfg["hidden_layer_sizes"]),
-            activation=model_cfg["activation"],
-            solver=model_cfg["solver"],
-            alpha=model_cfg["alpha"],
-            max_iter=model_cfg["max_iter"],
-            random_state=cfg["experiment"]["random_state"]
-        )
-    )
-    
-    scores = cross_val_score(clf, X, y, cv=cv, n_jobs=-1)
-    
-    print(f"  -> Mean Accuracy: {np.mean(scores):.2%}")
-    
-    with open(out_dir / "mlp_results.txt", "w") as f:
-        f.write(f"Configuration: {model_cfg['hidden_layer_sizes']}\n")
-        f.write(f"Mean Accuracy: {np.mean(scores):.4f}\n")
-
-# ----- MAIN PIPELINE -----
-
-def main_pipeline():
-    print("=== STARTING DECODING PIPELINE ===")
-    
-    # 1. Setup
-    cfg, cfg_path = load_config()
-    base_dir = cfg_path.parent
-    input_file = Path(base_dir) / cfg["paths"]["input_file"]
-    results_dir = Path(base_dir) / cfg["paths"]["results_dir"]
-    results_dir.mkdir(parents=True, exist_ok=True)
-    
-    # 2. Data Loading
-    print(f"Loading: {input_file}")
-    if not input_file.exists():
-        print("ERROR: Input file not found.")
-        return
-
-    epochs = mne.read_epochs(input_file, preload=True, verbose=False)
-    X, y = prepare_data(epochs, cfg)
-    
-    # 3. Run Models
+    # LDA
     if cfg["models"]["lda"]["enabled"]:
-        run_lda_time_resolved(X, y, cfg, results_dir, epochs.times)
-        
-    if cfg["models"]["log_reg"]["enabled"]:
-        run_logreg_whole_trial(X, y, cfg, results_dir)
-        
+        print("    > LDA...")
+        clf = make_pipeline(StandardScaler(), LinearDiscriminantAnalysis(solver='lsqr', shrinkage='auto'))
+        slider = SlidingEstimator(clf, scoring='accuracy', n_jobs=-1, verbose=False)
+        scores = cross_val_multiscore(slider, X, y, cv=cv, n_jobs=-1)
+        stats_collection["lda"] = calculate_stats("lda", scores, times, cfg["stats"]["chance_level"])
+
+    # MLP
     if cfg["models"]["mlp"]["enabled"]:
-        run_mlp_neural_net(X, y, cfg, results_dir)
+        print("    > MLP...")
+        m_cfg = cfg["models"]["mlp"]
+        clf = make_pipeline(StandardScaler(), MLPClassifier(
+            hidden_layer_sizes=tuple(m_cfg["hidden_layer_sizes"]), 
+            max_iter=m_cfg["max_iter"]))
+        slider = SlidingEstimator(clf, scoring='accuracy', n_jobs=-1, verbose=False)
+        scores = cross_val_multiscore(slider, X, y, cv=cv, n_jobs=-1)
+        stats_collection["mlp"] = calculate_stats("mlp", scores, times, cfg["stats"]["chance_level"])
         
-    print(f"\n=== DONE. Results saved to {results_dir} ===")
+    # PyTorch
+    if cfg["models"]["eegnet_slidingWindow"]["enabled"]:
+        print("    > EEGNet_slidingWindow...")
+        p_cfg = cfg["models"]["eegnet_slidingWindow"]
+        clf = make_pipeline(StandardScaler(), PyTorchEstimator(
+            hidden_dim=p_cfg["hidden_dim"], epochs=p_cfg["epochs"], lr=p_cfg["learning_rate"]))
+        slider = SlidingEstimator(clf, scoring='accuracy', n_jobs=1, verbose=False)
+        scores = cross_val_multiscore(slider, X, y, cv=cv, n_jobs=1)
+        stats_collection["eegnet_slidingWindow"] = calculate_stats("eegnet_slidingWindow", scores, times, cfg["stats"]["chance_level"])
+
+    # LogReg (Whole Trial)
+    if cfg["models"]["log_reg"]["enabled"]:
+        print("    > LogReg (Static)...")
+        m_cfg = cfg["models"]["log_reg"]
+        clf = make_pipeline(Vectorizer(), StandardScaler(), LogisticRegression(C=m_cfg["C"], max_iter=m_cfg["max_iter"]))
+        scores = cross_val_score(clf, X, y, cv=cv, n_jobs=-1)
+        # Add to text report only
+        with open(out_dir / "logreg_stats.txt", "w") as f:
+            f.write(f"Mean Accuracy: {np.mean(scores):.4f}\nStd: {np.std(scores):.4f}")
+
+    # Save Results
+    if stats_collection:
+        save_plots(stats_collection, times, cfg, out_dir, title_prefix)
+        full_report = pd.concat(stats_collection.values(), ignore_index=True)
+        full_report.to_csv(out_dir / "evaluation_report.csv", index=False)
+
+
+# --- MAIN ---
+def main():
+    print("=== 4D DECODING PIPELINE (Self/Other x Current/Previous) ===")
+    cfg, base_dir = load_config()
+    
+    input_file = resolve_path(cfg["paths"]["input_file"], base_dir)
+    results_base = resolve_path(cfg["paths"]["results_dir_base"], base_dir)
+    
+    if not input_file.exists():
+        print("ERROR: Input file missing.")
+        return
+        
+    # 1. Load EEG Base
+    print("  > Loading EEG...")
+    epochs_base = mne.read_epochs(input_file, preload=True, verbose=False)
+    epochs_base.resample(4.0) # Paper binning
+    epochs_base.crop(-0.2, 1.0)
+    
+    # 2. LOOP OVER TARGETS
+    targets = cfg["experiment"]["targets"]
+    
+    for target_name, target_config in targets.items():
+        print(f"\n--- Processing Target: {target_name.upper()} ---")
+        
+        # Prepare Data for this specific target (shift logic happens here)
+        X, y, times, is_dummy = prepare_data(epochs_base.copy(), cfg, base_dir, target_name, target_config)
+        
+        # Create Subfolder
+        prefix = "DUMMY_" if is_dummy else ""
+        out_dir = results_base / f"{prefix}{target_name}"
+        if out_dir.exists(): shutil.rmtree(out_dir) # Clean start
+        out_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Run
+        title = f"{target_name} {prefix}({target_config['column']})"
+        run_models(X, y, times, cfg, out_dir, title)
+        
+    print("\n=== ALL DONE. Check results folders. ===")
 
 if __name__ == "__main__":
-    main_pipeline()
+    main()
