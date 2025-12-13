@@ -23,8 +23,8 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
 from sklearn.linear_model import LogisticRegression
 from sklearn.neural_network import MLPClassifier
-from sklearn.model_selection import StratifiedKFold, cross_val_score
-from mne.decoding import SlidingEstimator, Vectorizer, cross_val_multiscore
+from sklearn.model_selection import StratifiedKFold
+from mne.decoding import SlidingEstimator, Vectorizer
 
 # PyTorch
 import torch
@@ -104,10 +104,119 @@ class PyTorchEstimator(BaseEstimator, ClassifierMixin):
         return np.mean(preds == y)
 
 # --- DATA PREP (With Shift Logic) ---
-def prepare_data(epochs, cfg, base_dir, target_name, target_config):
+def average_trials_by_class(X, y, n_avg, n_repeats=20, random_state=42):
+    """Average random subsets of trials within each class (matches cosmo_average_samples).
+    
+    Parameters
+    ----------
+    X : np.ndarray
+        Shape (n_trials, n_channels, n_times).
+    y : np.ndarray
+        Class labels (n_trials,).
+    n_avg : int
+        Number of trials to average together per sample.
+    n_repeats : int
+        Number of averaged samples to create per class.
+    random_state : int
+        Seed for reproducibility.
+    
+    Returns
+    -------
+    X_averaged : np.ndarray
+        Shape (n_samples, n_channels, n_times) where n_samples = n_classes * n_repeats.
+    y_averaged : np.ndarray
+        Corresponding labels.
+    """
+    rng = np.random.RandomState(random_state)
+    classes = np.unique(y)
+    X_avg_list = []
+    y_avg_list = []
+    
+    for cls in classes:
+        idx = np.where(y == cls)[0]
+        
+        if len(idx) < n_avg:
+            print(f"    ! Warning: Class {cls} has only {len(idx)} trials, need {n_avg}. Skipping.")
+            continue
+        
+        for rep in range(n_repeats):
+            # Random sample without replacement
+            sample_idx = rng.choice(idx, size=n_avg, replace=False)
+            X_avg_list.append(X[sample_idx].mean(axis=0))
+            y_avg_list.append(cls)
+    
+    return np.array(X_avg_list), np.array(y_avg_list)
+
+
+def bin_data(data, sfreq, times, bin_cfg):
+    """Bin continuous time samples into fixed windows (e.g., 250 ms).
+
+    Parameters
+    ----------
+    data : np.ndarray
+        Shape (n_epochs, n_channels, n_times).
+    sfreq : float
+        Sampling frequency in Hz.
+    times : np.ndarray
+        Time vector matching the last dimension of data.
+    bin_cfg : dict
+        Configuration with keys: enabled (bool), tmin, tmax, bin_size_sec, reduction.
+
+    Returns
+    -------
+    data_binned : np.ndarray
+        Shape (n_epochs, n_channels, n_bins).
+    times_binned : np.ndarray
+        Bin-centered time points.
+    """
+    if not bin_cfg.get("enabled", False):
+        return data, times
+
+    tmin = bin_cfg.get("tmin", times[0])
+    tmax = bin_cfg.get("tmax", times[-1])
+    bin_size = bin_cfg.get("bin_size_sec", 0.25)
+    reduction = bin_cfg.get("reduction", "mean")  # "mean", "center", "trimmed_mean"
+    trim_frac = bin_cfg.get("trim_fraction", 0.1)   # used when reduction == "trimmed_mean"
+
+    # Crop to desired window
+    mask = (times >= tmin) & (times <= tmax + 1e-9)
+    data = data[..., mask]
+    times = times[mask]
+
+    bin_samples = int(round(bin_size * sfreq))
+    total_samples = data.shape[-1]
+    n_bins = total_samples // bin_samples
+    if n_bins < 1:
+        raise ValueError(f"Not enough samples for binning: bin_size={bin_size}s, available={total_samples/sfreq:.3f}s")
+
+    # Trim to full bins
+    data = data[..., : n_bins * bin_samples]
+    data = data.reshape(data.shape[0], data.shape[1], n_bins, bin_samples)
+
+    if reduction == "center":
+        center_idx = bin_samples // 2
+        data_binned = data[:, :, :, center_idx]
+    elif reduction == "trimmed_mean":
+        # Trim lowest and highest fractions along the bin-sample axis before averaging
+        # reshape already (epochs, channels, bins, samples)
+        k = int(np.floor(trim_frac * bin_samples))
+        if k > 0:
+            data_sorted = np.sort(data, axis=-1)
+            data_trimmed = data_sorted[..., k:-k]
+        else:
+            data_trimmed = data
+        data_binned = data_trimmed.mean(axis=-1)
+    else:
+        data_binned = data.mean(axis=-1)
+
+    times_binned = np.arange(n_bins) * bin_size + tmin + (bin_size / 2.0)
+    return data_binned, times_binned
+
+
+def prepare_data(epochs, cfg, base_dir, target_name, target_config, bin_cfg):
     """
     Loads behavioral labels and aligns them with EEG.
-    Handles 'shift' for previous trial decoding.
+    Handles 'shift' for previous trial decoding and optional binning.
     """
     # 1. Load TSV
     tsv_path = resolve_path(cfg["paths"]["events_file"], base_dir)
@@ -129,7 +238,15 @@ def prepare_data(epochs, cfg, base_dir, target_name, target_config):
         events_df = events_df.iloc[:min_len]
         epochs = epochs[:min_len]
 
-    # 2. Extract and Shift Labels
+    # 2. Remove first trial of each block (no history for previous trial decoding)
+    # Paper uses 40-trial blocks; first trial is 0, 40, 80, ...
+    block_size = 40
+    first_of_block_mask = np.array([(i % block_size) == 0 for i in range(len(epochs))])
+    epochs = epochs[~first_of_block_mask]
+    events_df = events_df[~first_of_block_mask].reset_index(drop=True)
+    print(f"    > Removed {first_of_block_mask.sum()} first-of-block trials")
+    
+    # 3. Extract and Shift Labels
     col_name = target_config["column"]
     shift = target_config.get("shift", 0)
     
@@ -143,14 +260,14 @@ def prepare_data(epochs, cfg, base_dir, target_name, target_config):
         # Set first 'shift' elements to NaN (as they have no history)
         y_raw[:shift] = np.nan
         
-    # 3. Filter Invalid Labels (NaNs from shift or missing responses)
+    # 4. Filter Invalid Labels (NaNs from shift or missing responses)
     # Valid = Not NaN AND Not 0 (assuming 0 is 'no response')
     valid_mask = (~np.isnan(y_raw)) & (y_raw > 0)
     
     epochs_clean = epochs[valid_mask]
     y_clean = y_raw[valid_mask]
     
-    # 4. Remap Classes (to 0, 1, 2)
+    # 5. Remap Classes (to 0, 1, 2)
     unique_classes = np.unique(y_clean)
     
     if len(unique_classes) < 2:
@@ -166,7 +283,67 @@ def prepare_data(epochs, cfg, base_dir, target_name, target_config):
         y_clean = np.array([class_map[k] for k in y_clean])
 
     print(f"    > Target: {target_name} | Shift: {shift} | Valid Trials: {len(y_clean)}")
-    return epochs_clean.get_data(), y_clean, epochs_clean.times, is_dummy
+    data = epochs_clean.get_data()
+    times = epochs_clean.times
+    data, times = bin_data(data, epochs_clean.info["sfreq"], times, bin_cfg)
+    
+    # NOTE: Sample averaging is now done INSIDE cross-validation to prevent data leakage
+    # (previously averaged before CV, causing same trials to appear in train and test)
+
+    return data, y_clean, times, is_dummy
+
+# --- CUSTOM CV WITH PER-FOLD AVERAGING ---
+def cross_val_with_averaging(estimator, X, y, cv, avg_cfg, random_state=42):
+    """
+    Custom cross-validation that does sample averaging WITHIN each fold.
+    This prevents data leakage (same trials in train and test).
+    
+    Parameters
+    ----------
+    estimator : sklearn estimator or SlidingEstimator
+        The model to train and evaluate.
+    X : np.ndarray
+        Shape (n_trials, n_channels, n_times) for time-resolved,
+        or (n_trials, n_features) for static.
+    y : np.ndarray
+        Labels (n_trials,).
+    cv : cross-validator
+        e.g., StratifiedKFold.
+    avg_cfg : dict
+        Sample averaging config with keys: enabled, n_trials_per_average, n_repeats.
+    random_state : int
+        Seed for reproducibility.
+    
+    Returns
+    -------
+    scores : np.ndarray
+        Shape (n_folds, n_times) for time-resolved, or (n_folds,) for static.
+    """
+    scores_list = []
+    
+    for fold_idx, (train_idx, test_idx) in enumerate(cv.split(X, y)):
+        # Split data
+        X_train, X_test = X[train_idx], X[test_idx]
+        y_train, y_test = y[train_idx], y[test_idx]
+        
+        # Average within each fold separately (prevents leakage)
+        if avg_cfg.get("enabled", False):
+            n_avg = avg_cfg.get("n_trials_per_average", 4)
+            n_repeats = avg_cfg.get("n_repeats", 20)
+            
+            # Use different random seed per fold for diversity
+            train_seed = random_state + fold_idx * 100
+            test_seed = random_state + fold_idx * 100 + 50
+            
+            X_train, y_train = average_trials_by_class(X_train, y_train, n_avg, n_repeats, train_seed)
+            X_test, y_test = average_trials_by_class(X_test, y_test, n_avg, n_repeats, test_seed)
+        
+        # Train and score
+        estimator.fit(X_train, y_train)
+        score = estimator.score(X_test, y_test)
+        scores_list.append(score)
+    
+    return np.array(scores_list)
 
 # --- STATS ---
 def calculate_stats(model_name, scores, times, chance_level, alpha=0.05):
@@ -209,7 +386,7 @@ def save_plots(all_results, times, cfg, out_dir, title_prefix=""):
     ax.set_title(f"Decoding: {title_prefix}")
     ax.set_xlabel("Time (s)")
     ax.set_ylabel("Accuracy")
-    ax.set_xlim(-0.2, 1.0)
+    ax.set_xlim(times[0], times[-1])
     ax.legend(loc="upper right")
     ax.grid(True, alpha=0.3)
     
@@ -239,41 +416,63 @@ def run_models(X, y, times, cfg, out_dir, title_prefix):
     cv = StratifiedKFold(n_splits=cfg["experiment"]["n_folds"])
     stats_collection = {}
     
+    # Get averaging config
+    avg_cfg = cfg.get("experiment", {}).get("sample_averaging", {})
+    rand_state = cfg.get("experiment", {}).get("random_state", 42)
+    
     # LDA
     if cfg["models"]["lda"]["enabled"]:
-        print("    > LDA...")
+        print("    > LDA (with per-fold averaging)..." if avg_cfg.get("enabled") else "    > LDA...")
         clf = make_pipeline(StandardScaler(), LinearDiscriminantAnalysis(solver='lsqr', shrinkage='auto'))
         slider = SlidingEstimator(clf, scoring='accuracy', n_jobs=-1, verbose=False)
-        scores = cross_val_multiscore(slider, X, y, cv=cv, n_jobs=-1)
+        scores = cross_val_with_averaging(slider, X, y, cv, avg_cfg, rand_state)
         stats_collection["lda"] = calculate_stats("lda", scores, times, cfg["stats"]["chance_level"])
 
     # MLP
     if cfg["models"]["mlp"]["enabled"]:
-        print("    > MLP...")
+        print("    > MLP (with per-fold averaging)..." if avg_cfg.get("enabled") else "    > MLP...")
         m_cfg = cfg["models"]["mlp"]
         clf = make_pipeline(StandardScaler(), MLPClassifier(
             hidden_layer_sizes=tuple(m_cfg["hidden_layer_sizes"]), 
             max_iter=m_cfg["max_iter"]))
         slider = SlidingEstimator(clf, scoring='accuracy', n_jobs=-1, verbose=False)
-        scores = cross_val_multiscore(slider, X, y, cv=cv, n_jobs=-1)
+        scores = cross_val_with_averaging(slider, X, y, cv, avg_cfg, rand_state)
         stats_collection["mlp"] = calculate_stats("mlp", scores, times, cfg["stats"]["chance_level"])
         
     # PyTorch
     if cfg["models"]["eegnet_slidingWindow"]["enabled"]:
-        print("    > EEGNet_slidingWindow...")
+        print("    > EEGNet_slidingWindow (with per-fold averaging)..." if avg_cfg.get("enabled") else "    > EEGNet_slidingWindow...")
         p_cfg = cfg["models"]["eegnet_slidingWindow"]
         clf = make_pipeline(StandardScaler(), PyTorchEstimator(
             hidden_dim=p_cfg["hidden_dim"], epochs=p_cfg["epochs"], lr=p_cfg["learning_rate"]))
         slider = SlidingEstimator(clf, scoring='accuracy', n_jobs=1, verbose=False)
-        scores = cross_val_multiscore(slider, X, y, cv=cv, n_jobs=1)
+        scores = cross_val_with_averaging(slider, X, y, cv, avg_cfg, rand_state)
         stats_collection["eegnet_slidingWindow"] = calculate_stats("eegnet_slidingWindow", scores, times, cfg["stats"]["chance_level"])
 
     # LogReg (Whole Trial)
     if cfg["models"]["log_reg"]["enabled"]:
-        print("    > LogReg (Static)...")
+        print("    > LogReg (Static, with per-fold averaging)..." if avg_cfg.get("enabled") else "    > LogReg (Static)...")
         m_cfg = cfg["models"]["log_reg"]
         clf = make_pipeline(Vectorizer(), StandardScaler(), LogisticRegression(C=m_cfg["C"], max_iter=m_cfg["max_iter"]))
-        scores = cross_val_score(clf, X, y, cv=cv, n_jobs=-1)
+        
+        # Manual CV for static model with averaging
+        scores_list = []
+        for fold_idx, (train_idx, test_idx) in enumerate(cv.split(X, y)):
+            X_train, X_test = X[train_idx], X[test_idx]
+            y_train, y_test = y[train_idx], y[test_idx]
+            
+            if avg_cfg.get("enabled", False):
+                n_avg = avg_cfg.get("n_trials_per_average", 4)
+                n_repeats = avg_cfg.get("n_repeats", 20)
+                train_seed = rand_state + fold_idx * 100
+                test_seed = rand_state + fold_idx * 100 + 50
+                X_train, y_train = average_trials_by_class(X_train, y_train, n_avg, n_repeats, train_seed)
+                X_test, y_test = average_trials_by_class(X_test, y_test, n_avg, n_repeats, test_seed)
+            
+            clf.fit(X_train, y_train)
+            scores_list.append(clf.score(X_test, y_test))
+        
+        scores = np.array(scores_list)
         # Add to text report only
         with open(out_dir / "logreg_stats.txt", "w") as f:
             f.write(f"Mean Accuracy: {np.mean(scores):.4f}\nStd: {np.std(scores):.4f}")
@@ -290,39 +489,70 @@ def main():
     print("=== 4D DECODING PIPELINE (Self/Other x Current/Previous) ===")
     cfg, base_dir = load_config()
     
-    input_file = resolve_path(cfg["paths"]["input_file"], base_dir)
     results_base = resolve_path(cfg["paths"]["results_dir_base"], base_dir)
     
-    if not input_file.exists():
-        print("ERROR: Input file missing.")
-        return
-        
-    # 1. Load EEG Base
-    print("  > Loading EEG...")
-    epochs_base = mne.read_epochs(input_file, preload=True, verbose=False)
-    epochs_base.resample(4.0) # Paper binning
-    epochs_base.crop(-0.2, 1.0)
+    # Get pair and players from config
+    pair = cfg["pair_player"]["pair"]
+    players = cfg["pair_player"]["players"]
     
-    # 2. LOOP OVER TARGETS
-    targets = cfg["experiment"]["targets"]
+    print(f"\nProcessing Pair {pair:02d}, Players {players}")
+    print("="*60)
     
-    for target_name, target_config in targets.items():
-        print(f"\n--- Processing Target: {target_name.upper()} ---")
+    # LOOP OVER PLAYERS
+    for player in players:
+        print(f"\n{'='*60}")
+        print(f"PLAYER {player}")
+        print("="*60)
         
-        # Prepare Data for this specific target (shift logic happens here)
-        X, y, times, is_dummy = prepare_data(epochs_base.copy(), cfg, base_dir, target_name, target_config)
+        # Build paths for this player
+        input_file = resolve_path(
+            cfg["paths"]["input_template"].format(pair=pair, player=player),
+            base_dir
+        )
+        events_file = resolve_path(
+            cfg["paths"]["events_template"].format(pair=pair),
+            base_dir
+        )
         
-        # Create Subfolder
-        prefix = "DUMMY_" if is_dummy else ""
-        out_dir = results_base / f"{prefix}{target_name}"
-        if out_dir.exists(): shutil.rmtree(out_dir) # Clean start
-        out_dir.mkdir(parents=True, exist_ok=True)
+        # Update config with current events file (for prepare_data)
+        cfg["paths"]["events_file"] = str(events_file.relative_to(base_dir))
         
-        # Run
-        title = f"{target_name} {prefix}({target_config['column']})"
-        run_models(X, y, times, cfg, out_dir, title)
+        if not input_file.exists():
+            print(f"ERROR: Input file missing: {input_file}")
+            continue
+        if not events_file.exists():
+            print(f"ERROR: Events file missing: {events_file}")
+            continue
+            
+        # 1. Load EEG for this player
+        print(f"  > Loading EEG for pair {pair:02d}, player {player}...")
+        epochs_base = mne.read_epochs(str(input_file), preload=True, verbose=False)
         
-    print("\n=== ALL DONE. Check results folders. ===")
+        # Create player-specific results directory
+        player_dir = results_base / f"pair-{pair:02d}_player-{player}"
+        
+        # 2. LOOP OVER TARGETS
+        targets = cfg["experiment"]["targets"]
+        
+        for target_name, target_config in targets.items():
+            print(f"\n--- Processing Target: {target_name.upper()} ---")
+            
+            # Prepare Data for this specific target (shift logic happens here)
+            X, y, times, is_dummy = prepare_data(epochs_base.copy(), cfg, base_dir, target_name, target_config, cfg.get("binning", {}))
+            
+            # Create Subfolder: pair-XX_player-Y / target_name
+            prefix = "DUMMY_" if is_dummy else ""
+            out_dir = player_dir / f"{prefix}{target_name}"
+            if out_dir.exists(): shutil.rmtree(out_dir) # Clean start
+            out_dir.mkdir(parents=True, exist_ok=True)
+            
+            # Run
+            title = f"pair-{pair:02d}_player-{player} {target_name} {prefix}({target_config['column']})"
+            run_models(X, y, times, cfg, out_dir, title)
+        
+    print("\n" + "="*60)
+    print("=== ALL DONE. Check results folders. ===")
+    print("="*60)
 
 if __name__ == "__main__":
     main()

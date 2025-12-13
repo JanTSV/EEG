@@ -1,16 +1,28 @@
 # ===== PATHS =====
 paths:
-  input_file: "data/derivatives/pair-01_player-1_task-RPS_eeg-epo.fif"
-  events_file: "data/sub-01/eeg/sub-01_task-RPS_events.tsv"
+  # Templates use {pair:02d} and {player} placeholders
+  input_template: "data/derivatives/pair-{pair:02d}_player-{player}_task-RPS_eeg-epo.fif"
+  events_template: "data/sub-{pair:02d}/eeg/sub-{pair:02d}_task-RPS_events.tsv"
   # Base directory for all results
   results_dir_base: "data/derivatives/decoding_results"
+
+# ===== PAIR/PLAYER SELECTION =====
+pair_player:
+  pair: 1              # Which pair to process
+  players: [1, 2]      # Which players to process (typically both)
 
 # ===== EXPERIMENT SETTINGS =====
 experiment:
   allow_dummy_data: true
-  n_folds: 5
+  n_folds: 10
   random_state: 42
-  
+
+  # Sample averaging: average multiple trials per class for better SNR
+  sample_averaging:
+    enabled: true # set true to average trials before decoding
+    n_trials_per_average: 4 # number of trials to average (paper uses 4)
+    n_repeats: 20 # number of averaged samples per class (paper uses 20)
+
   # DEFINITION OF THE 4 DIMENSIONS (TARGETS)
   # 'column': The column name in the events.tsv
   # 'shift': 0 for current trial, 1 for previous trial
@@ -59,11 +71,20 @@ models:
     learning_rate: 0.001
     batch_size: 32
 
+# ===== BINNING (time-resolved decoding) =====
+binning:
+  enabled: true # enable 250 ms binning like the paper
+  tmin: 0.0 # start of analysis window (seconds)
+  tmax: 5.0 # end of analysis window (seconds)
+  bin_size_sec: 0.25 # bin width (seconds)
+  reduction: "trimmed_mean" # "mean" (average), "center" (center sample), "trimmed_mean"
+  trim_fraction: 0.1 # fraction to trim from each tail when reduction=trimmed_mean
+
 # ===== PLOTTING =====
 plotting:
   show_shadow: true
   colors:
-    lda: "#1f77b4"      # Blue
-    log_reg: "#ff7f0e"  # Orange
-    mlp: "#2ca02c"      # Green
+    lda: "#1f77b4" # Blue
+    log_reg: "#ff7f0e" # Orange
+    mlp: "#2ca02c" # Green
     eegnet_slidingWindow: "#d62728" # Red
