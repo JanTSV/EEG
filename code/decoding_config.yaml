@@ -8,8 +8,8 @@ paths:
 
 # ===== PAIR/PLAYER SELECTION =====
 pair_player:
-  pair: 1              # Which pair to process
-  players: [1, 2]      # Which players to process (typically both)
+  pair: 1 # Which pair to process
+  players: [1, 2] # Which players to process (typically both)
 
 # ===== EXPERIMENT SETTINGS =====
 experiment:
@@ -53,6 +53,12 @@ models:
     shrinkage: "auto"
     metric: "accuracy"
 
+  svm:
+    enabled: true
+    C: 1.0
+    kernel: "rbf"
+    gamma: "scale"
+
   log_reg:
     enabled: true
     C: 1.0
@@ -85,6 +91,7 @@ plotting:
   show_shadow: true
   colors:
     lda: "#1f77b4" # Blue
+    svm: "#9467bd" # Purple
     log_reg: "#ff7f0e" # Orange
     mlp: "#2ca02c" # Green
     eegnet_slidingWindow: "#d62728" # Red

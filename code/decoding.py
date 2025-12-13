@@ -23,6 +23,7 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
 from sklearn.linear_model import LogisticRegression
 from sklearn.neural_network import MLPClassifier
+from sklearn.svm import SVC
 from sklearn.model_selection import StratifiedKFold
 from mne.decoding import SlidingEstimator, Vectorizer
 
@@ -438,6 +439,18 @@ def run_models(X, y, times, cfg, out_dir, title_prefix):
         slider = SlidingEstimator(clf, scoring='accuracy', n_jobs=-1, verbose=False)
         scores = cross_val_with_averaging(slider, X, y, cv, avg_cfg, rand_state)
         stats_collection["mlp"] = calculate_stats("mlp", scores, times, cfg["stats"]["chance_level"])
+    
+    # SVM
+    if cfg["models"]["svm"]["enabled"]:
+        print("    > SVM (with per-fold averaging)..." if avg_cfg.get("enabled") else "    > SVM...")
+        m_cfg = cfg["models"]["svm"]
+        clf = make_pipeline(StandardScaler(), SVC(
+            C=m_cfg["C"], 
+            kernel=m_cfg["kernel"],
+            gamma=m_cfg["gamma"]))
+        slider = SlidingEstimator(clf, scoring='accuracy', n_jobs=-1, verbose=False)
+        scores = cross_val_with_averaging(slider, X, y, cv, avg_cfg, rand_state)
+        stats_collection["svm"] = calculate_stats("svm", scores, times, cfg["stats"]["chance_level"])
         
     # PyTorch
     if cfg["models"]["eegnet_slidingWindow"]["enabled"]:
