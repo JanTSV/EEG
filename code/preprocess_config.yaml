@@ -43,7 +43,7 @@ processing:
   # BioSemi records with active reference; average reference is standard for ERPs
 
   # ===== ARTIFACT REMOVAL: ICA =====
-  ica_enabled: false # Enable Independent Component Analysis to separate brain from artifacts
+  ica_enabled: true # Enable Independent Component Analysis to separate brain from artifacts
   ica_n_components: 20 # Number of components (typical 15-25 for 64-channel; more = slower)
   ica_method: fastica # fastICA: fast, deterministic; picard: slower, more stable
   ica_random_state: 42 # Seed for reproducibility (fastICA has random initialization)
