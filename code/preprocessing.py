@@ -224,22 +224,44 @@ def process_pair_player(
     # Typical: 15-25 components sufficient for 64-channel EEG; here using 20
     if processing_cfg.get("ica_enabled", False):
         print("    running ICA for artifact detection ...")
-        n_components = processing_cfg.get("ica_n_components", 20)
+        n_components = processing_cfg.get("ica_n_components", 20)  # If int: components, if float: variance (picard only)
         method = processing_cfg.get("ica_method", "fastica")
         random_state = processing_cfg.get("ica_random_state", 42)
+        max_iter = processing_cfg.get("ica_max_iter", "auto")
+        plot = processing_cfg.get("ica_plot", False)
+
+        # Downsample data to speed up ICA without losing too much accuracy
+        raw_ica = raw_player.copy()
+        raw_ica.resample(256)
         
-        ica = ICA(n_components=n_components, method=method, random_state=random_state, max_iter="auto")
-        ica.fit(raw_player, picks="eeg")
+        ica = ICA(n_components=n_components, 
+                  method=method,
+                  random_state=random_state,
+                  max_iter=max_iter)
+        ica.fit(raw_ica, picks="eeg")
         
         # Auto-detect EOG artifacts: uses frontal channels as proxy for eye activity
         # Threshold=3.0: standard; higher = stricter (fewer components excluded)
         try:
-            eog_indices, eog_scores = ica.find_bads_eog(raw_player, threshold=3.0)
+            # Use frontal EEG channels as proxies for EOG
+            frontal_chs = [ch for ch in ['Fp1', 'Fp2', 'AF7', 'AF8'] if ch in raw_ica.ch_names]
+
+            # Find bad EOG components
+            eog_indices, eog_scores = ica.find_bads_eog(raw_ica, ch_name=frontal_chs, threshold=3.0)
             ica.exclude = eog_indices
             if eog_indices:
                 print(f"    ICA detected {len(eog_indices)} EOG component(s): {eog_indices}")
         except RuntimeError:
             print("    No EOG channels found; skipping automatic EOG detection")
+
+        if plot:
+            # Plot ICA components for manual inspection
+            ica.plot_components(inst=raw_ica)
+
+            # Plot properties for first 20 components
+            ica.plot_properties(raw_ica,
+                                picks=range(min(ica.n_components_, 20)),
+                                psd_args=dict(fmax=40))
         
         # Apply ICA: removes marked artifact components from raw signal (in-place)
         if ica.exclude:
