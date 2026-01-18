@@ -1,97 +1,84 @@
-# ===== PATHS =====
-paths:
-  # Templates use {pair:02d} and {player} placeholders
-  input_template: "data/derivatives/pair-{pair:02d}_player-{player}_task-RPS_eeg-epo.fif"
-  events_template: "data/sub-{pair:02d}/eeg/sub-{pair:02d}_task-RPS_events.tsv"
-  # Base directory for all results
-  results_dir_base: "data/derivatives/decoding_results"
-
-# ===== PAIR/PLAYER SELECTION =====
-pair_player:
-  pair: 1 # Which pair to process
-  players: [1, 2] # Which players to process (typically both)
-
-# ===== EXPERIMENT SETTINGS =====
+binning:
+  bin_size_sec: 0.25
+  enabled: true
+  reduction: trimmed_mean
+  tmax: 5.0
+  tmin: 0.0
+  trim_fraction: 0.1
 experiment:
-  allow_dummy_data: true
+  allow_dummy_data: true # Allow dummy data for testing (random noise epochs) set to false later?
   n_folds: 10
   random_state: 42
-
-  # Sample averaging: average multiple trials per class for better SNR
+  block_size: 40  # Size of trial blocks (first trial of each block removed for previous trial decoding)
+  topomap_method: ldaweights  # Options: 'ldaweights' (fast, LDA weights) or 'searchlight' (slow, all channels)
   sample_averaging:
-    enabled: true # set true to average trials before decoding
-    n_trials_per_average: 4 # number of trials to average (paper uses 4)
-    n_repeats: 20 # number of averaged samples per class (paper uses 20)
-
-  # DEFINITION OF THE 4 DIMENSIONS (TARGETS)
-  # 'column': The column name in the events.tsv
-  # 'shift': 0 for current trial, 1 for previous trial
+    enabled: true
+    n_repeats: 20
+    n_trials_per_average: 4
   targets:
-    current_self:
-      column: "player1_resp"
-      shift: 0
     current_other:
-      column: "player2_resp"
+      column: player2_resp
       shift: 0
-    previous_self:
-      column: "player1_resp"
-      shift: 1
+    current_self:
+      column: player1_resp
+      shift: 0
     previous_other:
-      column: "player2_resp"
+      column: player2_resp
       shift: 1
-
-# ===== STATISTICS =====
+    previous_self:
+      column: player1_resp
+      shift: 1
+models:
+  eegnet_slidingWindow:
+    batch_size: 32
+    enabled: true
+    epochs: 50
+    hidden_dim: 64
+    learning_rate: 0.001
+  lda:
+    enabled: true
+    metric: accuracy
+    shrinkage: auto
+    solver: lsqr
+  log_reg:
+    C: 1.0
+    enabled: false
+    max_iter: 1000
+  mlp:
+    activation: relu
+    enabled: true
+    hidden_layer_sizes:
+    - 64
+    - 32
+    max_iter: 1000
+  svm:
+    C: 1.0
+    enabled: true
+    gamma: scale
+    kernel: linear
+pair_player:
+  pair_ranges:
+    - [1, 9]
+    - [11, 22]
+    - [25, 34]
+  target_pairs: null  # Subset of pairs to process (null = all in ranges)
+  players:
+  - 1
+  - 2
+paths:
+  events_template: data/sub-{pair:02d}/eeg/sub-{pair:02d}_task-RPS_events.tsv
+  input_template: data/pair-{pair:02d}_player-{player}_task-RPS_eeg-epo.fif
+  results_dir_base: data/decoding_results
+plotting:
+  colors:
+    eegnet_slidingWindow: '#d62728'
+    lda: '#1f77b4'
+    log_reg: '#ff7f0e'
+    mlp: '#2ca02c'
+    svm: '#9467bd'
+  show_shadow: true
 stats:
   alpha: 0.05
   chance_level: 0.3333
-
-# ===== MODELS =====
-models:
-  lda:
-    enabled: true
-    solver: "lsqr"
-    shrinkage: "auto"
-    metric: "accuracy"
-
-  svm:
-    enabled: true
-    C: 1.0
-    kernel: "rbf"
-    gamma: "scale"
-
-  log_reg:
-    enabled: true
-    C: 1.0
-    max_iter: 1000
-
-  mlp:
-    enabled: true
-    hidden_layer_sizes: [100, 50]
-    activation: "relu"
-    max_iter: 500
-
-  eegnet_slidingWindow:
-    enabled: true
-    hidden_dim: 64
-    epochs: 20
-    learning_rate: 0.001
-    batch_size: 32
-
-# ===== BINNING (time-resolved decoding) =====
-binning:
-  enabled: true # enable 250 ms binning like the paper
-  tmin: 0.0 # start of analysis window (seconds)
-  tmax: 5.0 # end of analysis window (seconds)
-  bin_size_sec: 0.25 # bin width (seconds)
-  reduction: "trimmed_mean" # "mean" (average), "center" (center sample), "trimmed_mean"
-  trim_fraction: 0.1 # fraction to trim from each tail when reduction=trimmed_mean
-
-# ===== PLOTTING =====
-plotting:
-  show_shadow: true
-  colors:
-    lda: "#1f77b4" # Blue
-    svm: "#9467bd" # Purple
-    log_reg: "#ff7f0e" # Orange
-    mlp: "#2ca02c" # Green
-    eegnet_slidingWindow: "#d62728" # Red
+  use_bayes_factors: false # Use Bayesian t-tests (requires R BayesFactor package; currently not implemented)
+  bayes_null_effect_size_range: [0.5, 10.0] # Null: effect size >= 0.5 (matches MATLAB: nullInterval=c(0.5,Inf))

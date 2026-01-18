@@ -1,13 +1,14 @@
 # ----- SKETCH -----
 # EEG preprocessing pipeline for dual-player RPS task:
 # 1. Load raw BDF files (BioSemi 64-channel system, 2048 Hz)
-# 2. Select player-specific channels (masking by channel labels)\n# 3. Standardize to canonical montage (BioSemi64)
+# 2. Select player-specific channels (masking by channel labels)
+# 3. Standardize to canonical montage (BioSemi64)
 # 4. Re-reference to average (neutral reference for group analysis)
 # 5. Filter: notch (line noise) + band-pass (signal of interest)
-# 6. ICA (Independent Component Analysis) to remove eye/muscle artifacts
-# 7. Epoch around stimulus onset with baseline correction
-# 8. Interpolate bad channels (marked in participants.tsv)
-# 9. Downsample to 256 Hz (balance temporal resolution vs. file size)
+# 6. Interpolate bad channels (marked in participants.tsv) - BEFORE ICA for clean input
+# 7. Downsample to 256 Hz (speeds up ICA; sufficient for ERP analysis)
+# 8. ICA (Independent Component Analysis) to remove eye/muscle artifacts
+# 9. Epoch around stimulus onset with baseline correction
 # 10. Save as FIF (Functional Image File Format, MNE-native)
 #
 # Methods:
@@ -29,6 +30,7 @@ import matplotlib
 matplotlib.use("QtAgg")
 import warnings
 import yaml
+import argparse
 
 warnings.filterwarnings("ignore", message="QObject::connect")
 
@@ -54,7 +56,7 @@ def build_channel_mask(channel_names: np.ndarray, include_patterns: Sequence[str
     ], dtype=bool)
 
 
-def pipeline(config_path: Optional[Union[str, Path]] = None):
+def pipeline(output_dir="derivatives", config_path: Optional[Union[str, Path]] = None):
     # Step 1: read demographics
     print("starting pipeline ...")
     cfg, cfg_path = load_config(config_path)
@@ -65,6 +67,10 @@ def pipeline(config_path: Optional[Union[str, Path]] = None):
         return path if path.is_absolute() else (base_dir / path)
 
     paths_cfg = cfg["paths"]
+    
+    # Update derivatives_dir to use specified output directory
+    # base_dir is code/, so ../data/ goes to EEG/data/
+    paths_cfg["derivatives_dir"] = f"../data/{output_dir}"
     processing_cfg = cfg["processing"]
     data_cfg = cfg["data"]
     timing_cfg = cfg["timing"]
@@ -217,10 +223,42 @@ def process_pair_player(
         print(f"    filtering raw (l={l_out}, h={h_out}, method={method}) ...")
         raw_player.filter(l_freq=l_out, h_freq=h_out, picks="eeg", method=method)
 
-    # ===== STEP 4: ARTIFACT REMOVAL - ICA (INDEPENDENT COMPONENT ANALYSIS) =====
+    # ===== STEP 4: BAD CHANNEL INTERPOLATION (OPTIONAL) =====
+    # Interpolate channels marked as bad (noisy, high impedance, etc.) using spherical spline
+    # Why: clean data improves ICA decomposition; removes obvious noise sources before ICA
+    # Method: spherical spline (accurate) - fits surface on good channels, extrapolates to bad channels
+    if processing_cfg["interpolate_bad_channels"]:
+        sub_id = f"sub-{pair:02d}"
+        chan_to_fix = demographics.loc[demographics["participant_id"] == sub_id]
+        bad_str = chan_to_fix.iloc[0, bad_cfg["player1_column_index"]] if player == 1 else chan_to_fix.iloc[0, bad_cfg["player2_column_index"]]
+        if isinstance(bad_str, str) and bad_str.strip():
+            bads = [ch.strip() for ch in bad_str.split(",")]
+            print(f"    interpolating bad channels: {bads}")
+            raw_player.info["bads"] = bads
+            raw_player = raw_player.interpolate_bads(reset_bads=True, mode="accurate")
+        else:
+            print("    no bad channels listed for this participant.")
+
+    # ===== STEP 5: DOWNSAMPLING (BEFORE ICA) =====
+    # Downsample before ICA to speed up computation without losing accuracy
+    # Why here: ICA is computationally expensive; 256 Hz sufficient for component separation
+    # Note: Event sample indices must be adjusted after resampling!
+    original_sfreq = raw_player.info['sfreq']
+    if processing_cfg["down_sample"]:
+        target_sfreq = processing_cfg["downsample_rate_hz"]
+        print(f"    downsampling to {target_sfreq} Hz (before ICA) ...")
+        raw_player.resample(target_sfreq)
+        
+        # CRITICAL: Adjust event sample indices to match new sampling rate
+        # Formula: new_sample = old_sample * (new_sfreq / old_sfreq)
+        sfreq_ratio = target_sfreq / original_sfreq
+        onset_sample = (onset_sample * sfreq_ratio).astype(int)
+        print(f"    adjusted event sample indices for new sampling rate (ratio={sfreq_ratio:.4f})")
+    
+    # ===== STEP 6: ARTIFACT REMOVAL - ICA (INDEPENDENT COMPONENT ANALYSIS) =====
     # Goal: separate brain activity from physiological artifacts (eye blinks, muscle, heartbeat)
     # Method: fastICA finds statistically independent components; auto-detects EOG (eye) artifacts
-    # Why after filtering: filtered signal has better SNR for ICA decomposition
+    # Why after filtering & downsampling: filtered signal has better SNR; lower sfreq speeds up ICA
     # Typical: 15-25 components sufficient for 64-channel EEG; here using 20
     if processing_cfg.get("ica_enabled", False):
         print("    running ICA for artifact detection ...")
@@ -229,25 +267,21 @@ def process_pair_player(
         random_state = processing_cfg.get("ica_random_state", 42)
         max_iter = processing_cfg.get("ica_max_iter", "auto")
         plot = processing_cfg.get("ica_plot", False)
-
-        # Downsample data to speed up ICA without losing too much accuracy
-        raw_ica = raw_player.copy()
-        raw_ica.resample(256)
         
         ica = ICA(n_components=n_components, 
                   method=method,
                   random_state=random_state,
                   max_iter=max_iter)
-        ica.fit(raw_ica, picks="eeg")
+        ica.fit(raw_player, picks="eeg")
         
         # Auto-detect EOG artifacts: uses frontal channels as proxy for eye activity
         # Threshold=3.0: standard; higher = stricter (fewer components excluded)
         try:
             # Use frontal EEG channels as proxies for EOG
-            frontal_chs = [ch for ch in ['Fp1', 'Fp2', 'AF7', 'AF8'] if ch in raw_ica.ch_names]
+            frontal_chs = [ch for ch in ['Fp1', 'Fp2', 'AF7', 'AF8'] if ch in raw_player.ch_names]
 
             # Find bad EOG components
-            eog_indices, eog_scores = ica.find_bads_eog(raw_ica, ch_name=frontal_chs, threshold=3.0)
+            eog_indices, eog_scores = ica.find_bads_eog(raw_player, ch_name=frontal_chs, threshold=3.0)
             ica.exclude = eog_indices
             if eog_indices:
                 print(f"    ICA detected {len(eog_indices)} EOG component(s): {eog_indices}")
@@ -256,10 +290,10 @@ def process_pair_player(
 
         if plot:
             # Plot ICA components for manual inspection
-            ica.plot_components(inst=raw_ica)
+            ica.plot_components(inst=raw_player)
 
             # Plot properties for first 20 components
-            ica.plot_properties(raw_ica,
+            ica.plot_properties(raw_player,
                                 picks=range(min(ica.n_components_, 20)),
                                 psd_args=dict(fmax=40))
         
@@ -270,7 +304,7 @@ def process_pair_player(
         else:
             print("    No artifacts detected by ICA")
 
-    # ===== STEP 5: EPOCHING WITH BASELINE CORRECTION =====
+    # ===== STEP 6: EPOCHING WITH BASELINE CORRECTION =====
     # Extract [-0.2, 5.0] second windows around each stimulus onset
     # Why: creates time-synchronized trial structure (epochs) for averaging and statistical analysis
     # Format: MNE expects events as [sample_index, 0, event_id] (sample is 0-indexed)
@@ -292,7 +326,7 @@ def process_pair_player(
         detrend=processing_cfg["detrend"],
     )
 
-    # ===== STEP 6: VISUAL INSPECTION (OPTIONAL) =====
+    # ===== STEP 7: VISUAL INSPECTION (OPTIONAL) =====
     # Plot filtered epochs for manual bad-channel marking
     # Temporary filter applied here (not saved) to improve visualization (higher frequency cutoff helps see components)
     # User can visually mark bad channels, which MNE will flag for later interpolation
@@ -304,30 +338,13 @@ def process_pair_player(
         print("    opening plot window (mark bad channels manually)...")
         epochs_filt.plot(n_epochs=10, n_channels=32, scalings="auto")
 
-    # ===== STEP 7: BAD CHANNEL INTERPOLATION (OPTIONAL) =====
-    # Interpolate channels marked as bad (noisy, high impedance, etc.) using spherical spline
-    # Why interpolate: preserves data at noisy channels instead of discarding them;
-    # allows analysis with full montage (useful for source localization, topoplots, connectivity)
-    # Method: spherical spline (accurate) - fits surface on good channels, extrapolates to bad channels
-    if processing_cfg["interpolate_bad_channels"]:
-        sub_id = f"sub-{pair:02d}"
-        chan_to_fix = demographics.loc[demographics["participant_id"] == sub_id]
-        bad_str = chan_to_fix.iloc[0, bad_cfg["player1_column_index"]] if player == 1 else chan_to_fix.iloc[0, bad_cfg["player2_column_index"]]
-        if isinstance(bad_str, str) and bad_str.strip():
-            bads = [ch.strip() for ch in bad_str.split(",")]
-            print(f"    interpolating bad channels: {bads}")
-            epochs.info["bads"] = bads
-            epochs = epochs.interpolate_bads(reset_bads=True, mode="accurate")
-        else:
-            print("    no bad channels listed for this participant.")
-
-    # ===== STEP 8: AMPLITUDE-BASED EPOCH REJECTION (OPTIONAL) =====
+    # ===== STEP 9: AMPLITUDE-BASED EPOCH REJECTION (OPTIONAL) =====
     # Flag and remove epochs with abnormally high voltages (e.g., muscle artifacts, electrode pops)
     # Method: peak-to-peak amplitude check; compares each epoch to user-defined threshold
     # Why: removes outlier trials contaminated by non-brain artifacts after ICA
-    # Note: Typical EEG 200-500 µV; threshold set in config (currently 100 µV is too strict - consider disabling)
+    # Note: Typical EEG 200-500 µV; threshold set in config (200 µV is reasonable)
     if processing_cfg.get("amplitude_reject_enabled", False):
-        threshold_uv = processing_cfg.get("amplitude_reject_threshold_uv", 100.0)
+        threshold_uv = processing_cfg.get("amplitude_reject_threshold_uv", 200.0)
         threshold_v = threshold_uv * 1e-6  # convert µV to V
         n_before = len(epochs)
         epochs.drop_bad(reject=dict(eeg=threshold_v))
@@ -337,15 +354,6 @@ def process_pair_player(
             print(f"    amplitude rejection: dropped {n_dropped}/{n_before} epochs (threshold={threshold_uv} µV)")
         else:
             print(f"    amplitude rejection: no epochs dropped (threshold={threshold_uv} µV)")
-
-    # ===== STEP 9: DOWNSAMPLING (OPTIONAL) =====
-    # Resample epochs from native 2048 Hz to lower rate (e.g., 256 Hz)
-    # Why: reduces file size (~8x smaller at 256 Hz vs. 2048 Hz); sufficient for ERP analysis
-    # Tradeoff: lower temporal resolution; but 256 Hz captures ERP waveforms up to ~100 Hz components
-    # Method: MNE's resample uses polyphase filtering + decimation (anti-aliasing included)
-    if processing_cfg["down_sample"]:
-        print(f"    downsampling to {processing_cfg['downsample_rate_hz']} Hz ...")
-        epochs = epochs.copy().resample(processing_cfg["downsample_rate_hz"])
 
     # ===== STEP 10: SAVE TO DISK =====
     # Save preprocessed epochs to FIF format (MNE-native binary format)
@@ -390,7 +398,12 @@ def plot_data(raw_path: Optional[str], plot_cfg: dict):
     
     
 if __name__ == "__main__":
-    pipeline()
+    parser = argparse.ArgumentParser(description="EEG preprocessing pipeline")
+    parser.add_argument("--out", type=str, default="derivatives",
+                       help="Output directory (relative to data/); default: data/derivatives")
+    args = parser.parse_args()
+    
+    pipeline(output_dir=args.out)
     
     
     

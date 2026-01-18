@@ -12,7 +12,7 @@ paths:
 processing:
   # ===== INSPECTION & QUALITY CONTROL =====
   identify_bad_channels: false # Open interactive plot to manually mark bad channels (may contain noise/artifact)
-  interpolate_bad_channels: false # Interpolate bad channels using spherical spline (alternative: discard them)
+  interpolate_bad_channels: true # Interpolate bad channels using spherical spline (alternative: discard them)
   plot_data: false # Plot raw data for visual inspection (requires plot_raw_path set above)
 
   # ===== DOWNSAMPLING =====
@@ -73,7 +73,7 @@ data:
     - [1, 9] # Pairs 1-9
     - [11, 22] # Pairs 11-22 (note: pair 10, 23-24 missing/corrupted)
     - [25, 34] # Pairs 25-34
-  target_pairs: [01] # Which pairs to actually process (subset of ranges above for testing/debugging)
+  target_pairs: null # Which pairs to actually process (subset of ranges above for testing/debugging)
 # ===== TIMING & SAMPLING =====
 timing:
   fs_hz: 2048 # Original sampling rate (BioSemi 2048 Hz; don't change)
@@ -82,8 +82,8 @@ timing:
 # ===== BAD CHANNELS SPECIFICATION =====
 # Column indices in participants.tsv where bad channel lists are stored (comma-separated channel names)
 bad_channels:
-  player1_column_index: 6 # Column index for player 1 bad channels in participants.tsv
-  player2_column_index: 11 # Column index for player 2 bad channels in participants.tsv
+  player1_column_index: 5 # Column index for player 1 bad channels in participants.tsv
+  player2_column_index: 9 # Column index for player 2 bad channels in participants.tsv
 # ===== CHANNEL SELECTION =====
 # Pattern matching to select player-specific channels from dual-player recordings
 # (raw BDF contains both players' channels mixed; extract by partial string matching)

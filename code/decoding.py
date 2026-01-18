@@ -241,7 +241,7 @@ def prepare_data(epochs, cfg, base_dir, target_name, target_config, bin_cfg):
 
     # 2. Remove first trial of each block (no history for previous trial decoding)
     # Paper uses 40-trial blocks; first trial is 0, 40, 80, ...
-    block_size = 40
+    block_size = cfg.get("experiment", {}).get("block_size", 40)
     first_of_block_mask = np.array([(i % block_size) == 0 for i in range(len(epochs))])
     epochs = epochs[~first_of_block_mask]
     events_df = events_df[~first_of_block_mask].reset_index(drop=True)
@@ -292,6 +292,168 @@ def prepare_data(epochs, cfg, base_dir, target_name, target_config, bin_cfg):
     # (previously averaged before CV, causing same trials to appear in train and test)
 
     return data, y_clean, times, is_dummy
+
+# --- LDA PATTERN EXTRACTION FOR TOPOPLOTS ---
+def extract_lda_patterns(estimator, X, y, cv, avg_cfg, random_state=42):
+    """
+    Extract LDA activation patterns (not weights) for topographic visualization.
+    
+    Activation patterns (Haufe et al., 2014) show true neural sources, unlike 
+    classifier weights which can be misleading due to correlated channels.
+    
+    Pattern = Cov(X) @ Weight, where Cov(X) is the data covariance matrix.
+    
+    Parameters
+    ----------
+    estimator : sklearn LDA
+        Linear Discriminant Analysis classifier.
+    X : np.ndarray
+        Shape (n_trials, n_channels, n_times).
+    y : np.ndarray
+        Labels (n_trials,).
+    cv : cross-validator
+        Cross-validation strategy.
+    avg_cfg : dict
+        Sample averaging configuration.
+    random_state : int
+        Random seed.
+    
+    Returns
+    -------
+    patterns : np.ndarray
+        Shape (n_channels, n_times) - activation patterns per channel per time bin.
+    """
+    from sklearn.covariance import LedoitWolf
+    
+    n_channels = X.shape[1]
+    n_times = X.shape[2]
+    patterns = np.zeros((n_channels, n_times))
+    
+    # Extract patterns for each time bin
+    for t in range(n_times):
+        X_t = X[:, :, t]  # (n_trials, n_channels)
+        
+        # Average patterns across CV folds
+        fold_patterns = []
+        for train_idx, test_idx in cv.split(X_t, y):
+            X_train, y_train = X_t[train_idx], y[train_idx]
+            
+            # Apply sample averaging
+            if avg_cfg.get("enabled", False):
+                n_avg = avg_cfg.get("n_trials_per_average", 4)
+                n_repeats = avg_cfg.get("n_repeats", 20)
+                X_train, y_train = average_trials_by_class(
+                    X_train.reshape(len(X_train), -1, 1), 
+                    y_train, n_avg, n_repeats, random_state
+                )
+                X_train = X_train.squeeze()
+            
+            # Train LDA
+            estimator.fit(X_train, y_train)
+            
+            # Extract weight vector (for binary: single vector, multiclass: multiple)
+            if hasattr(estimator, 'coef_'):
+                weights = estimator.coef_[0] if estimator.coef_.shape[0] == 1 else estimator.coef_.mean(axis=0)
+            else:
+                continue
+            
+            # Compute data covariance (use Ledoit-Wolf for stability)
+            cov_estimator = LedoitWolf()
+            cov = cov_estimator.fit(X_train).covariance_
+            
+            # Activation pattern: Cov(X) @ w (Haufe et al., 2014)
+            pattern = cov @ weights
+            fold_patterns.append(pattern)
+        
+        # Average across folds
+        patterns[:, t] = np.mean(fold_patterns, axis=0)
+    
+    # Take absolute value (we care about magnitude, not sign)
+    patterns = np.abs(patterns)
+    
+    # Keep time dimension for temporal topomaps (n_channels, n_times)
+    return patterns
+
+# --- CHANNEL SEARCHLIGHT DECODING ---
+def channel_searchlight_decode(estimator, X, y, cv, avg_cfg, info, random_state=42):
+    """
+    Perform channel searchlight decoding: decode using each channel + 4-5 neighbors.
+    Returns decoding accuracy at each channel location for each time bin.
+    
+    Matches Moerel et al. (2025): Uses 250ms binned data, each bin decoded independently.
+    
+    Parameters
+    ----------
+    estimator : sklearn estimator
+        The base classifier (LDA, SVM, etc.).
+    X : np.ndarray
+        Shape (n_trials, n_channels, n_times) - already 250ms binned.
+    y : np.ndarray
+        Labels (n_trials,).
+    cv : cross-validator
+        Cross-validation strategy.
+    avg_cfg : dict
+        Sample averaging configuration.
+    info : mne.Info
+        MNE info object with channel positions.
+    random_state : int
+        Random seed.
+    
+    Returns
+    -------
+    searchlight_acc : np.ndarray
+        Shape (n_channels, n_times) - decoding accuracy for each channel cluster at each time point.
+    """
+    from sklearn.metrics import accuracy_score
+    
+    n_channels = X.shape[1]
+    n_times = X.shape[2]
+    
+    # Get channel neighbors (4-5 neighbors per channel)
+    from mne.channels import find_ch_adjacency
+    adjacency, ch_names = find_ch_adjacency(info, ch_type='eeg')
+    adjacency_matrix = adjacency.toarray()
+    
+    searchlight_acc_time = np.zeros((n_channels, n_times))  # Accuracy per channel per time
+    
+    for ch_idx in range(n_channels):
+        # Find neighbors: channel + 4-5 nearby channels
+        neighbors = np.where(adjacency_matrix[ch_idx] > 0)[0]
+        cluster_idx = np.concatenate([[ch_idx], neighbors])
+        
+        # Extract data for this channel cluster
+        X_cluster = X[:, cluster_idx, :]  # (n_trials, n_cluster_channels, n_times)
+        
+        # Decode each time bin independently (MATLAB: time radius = 0)
+        for t in range(n_times):
+            X_t = X_cluster[:, :, t]  # (n_trials, n_cluster_channels)
+            
+            # Cross-validate on this time bin
+            fold_scores = []
+            for train_idx, test_idx in cv.split(X_t, y):
+                X_train, X_test = X_t[train_idx], X_t[test_idx]
+                y_train, y_test = y[train_idx], y[test_idx]
+                
+                # Apply sample averaging within fold
+                if avg_cfg.get("enabled", False):
+                    n_avg = avg_cfg.get("n_trials_per_average", 4)
+                    n_repeats = avg_cfg.get("n_repeats", 20)
+                    X_train, y_train = average_trials_by_class(
+                        X_train.reshape(len(X_train), -1, 1), 
+                        y_train, n_avg, n_repeats, random_state
+                    )
+                    X_train = X_train.squeeze()
+                
+                # Train and test
+                estimator.fit(X_train, y_train)
+                y_pred = estimator.predict(X_test)
+                fold_scores.append(accuracy_score(y_test, y_pred))
+            
+            searchlight_acc_time[ch_idx, t] = np.mean(fold_scores)
+    
+    # Return time-resolved accuracy for temporal topomaps (n_channels, n_times)
+    return searchlight_acc_time
+
 
 # --- CUSTOM CV WITH PER-FOLD AVERAGING ---
 def cross_val_with_averaging(estimator, X, y, cv, avg_cfg, random_state=42):
@@ -413,7 +575,7 @@ def save_plots(all_results, times, cfg, out_dir, title_prefix=""):
         plt.close(fig)
 
 # --- RUNNERS ---
-def run_models(X, y, times, cfg, out_dir, title_prefix):
+def run_models(X, y, times, cfg, out_dir, title_prefix, info=None):
     cv = StratifiedKFold(n_splits=cfg["experiment"]["n_folds"])
     stats_collection = {}
     
@@ -428,6 +590,29 @@ def run_models(X, y, times, cfg, out_dir, title_prefix):
         slider = SlidingEstimator(clf, scoring='accuracy', n_jobs=-1, verbose=False)
         scores = cross_val_with_averaging(slider, X, y, cv, avg_cfg, rand_state)
         stats_collection["lda"] = calculate_stats("lda", scores, times, cfg["stats"]["chance_level"])
+        
+        # Topographic visualization: choose method from config
+        topomap_method = cfg.get("experiment", {}).get("topomap_method", "ldaweights")
+        
+        if info is not None and topomap_method == "searchlight":
+            # Slow but accurate: decode each channel cluster
+            try:
+                base_clf = make_pipeline(StandardScaler(), LinearDiscriminantAnalysis(solver='lsqr', shrinkage='auto'))
+                searchlight_acc = channel_searchlight_decode(base_clf, X, y, cv, avg_cfg, info, rand_state)
+                np.save(out_dir / "lda_topomap.npy", searchlight_acc)
+                print(f"      > Saved searchlight topomap: {out_dir / 'lda_topomap.npy'}")
+            except Exception as e:
+                print(f"      > Searchlight failed: {e}")
+        
+        elif info is not None and topomap_method == "ldaweights":
+            # Fast: extract LDA activation patterns
+            try:
+                base_clf = LinearDiscriminantAnalysis(solver='lsqr', shrinkage='auto')
+                patterns = extract_lda_patterns(base_clf, X, y, cv, avg_cfg, rand_state)
+                np.save(out_dir / "lda_topomap.npy", patterns)
+                print(f"      > Saved LDA pattern topomap: {out_dir / 'lda_topomap.npy'}")
+            except Exception as e:
+                print(f"      > LDA pattern extraction failed: {e}")
 
     # MLP
     if cfg["models"]["mlp"]["enabled"]:
@@ -439,7 +624,7 @@ def run_models(X, y, times, cfg, out_dir, title_prefix):
         slider = SlidingEstimator(clf, scoring='accuracy', n_jobs=-1, verbose=False)
         scores = cross_val_with_averaging(slider, X, y, cv, avg_cfg, rand_state)
         stats_collection["mlp"] = calculate_stats("mlp", scores, times, cfg["stats"]["chance_level"])
-    
+
     # SVM
     if cfg["models"]["svm"]["enabled"]:
         print("    > SVM (with per-fold averaging)..." if avg_cfg.get("enabled") else "    > SVM...")
@@ -461,6 +646,9 @@ def run_models(X, y, times, cfg, out_dir, title_prefix):
         slider = SlidingEstimator(clf, scoring='accuracy', n_jobs=1, verbose=False)
         scores = cross_val_with_averaging(slider, X, y, cv, avg_cfg, rand_state)
         stats_collection["eegnet_slidingWindow"] = calculate_stats("eegnet_slidingWindow", scores, times, cfg["stats"]["chance_level"])
+        
+        # Channel searchlight (skip for PyTorch due to complexity)
+        # EEGNet requires specific input shapes - searchlight not applicable
 
     # LogReg (Whole Trial)
     if cfg["models"]["log_reg"]["enabled"]:
@@ -497,71 +685,104 @@ def run_models(X, y, times, cfg, out_dir, title_prefix):
         full_report.to_csv(out_dir / "evaluation_report.csv", index=False)
 
 
+# --- HELPER ---
+def extract_pair_ids(pair_ranges: list) -> list[int]:
+    """Extract list of pair IDs from pair_ranges specification."""
+    pair_ids_list = []
+    for pair_range in pair_ranges:
+        pair_ids_list += list(range(pair_range[0], pair_range[1] + 1))
+    return pair_ids_list
+
+
 # --- MAIN ---
 def main():
+    import argparse
+    
+    parser = argparse.ArgumentParser(description="Run decoding pipeline on all pairs/players")
+    parser.add_argument("--out", type=str, default="derivatives", 
+                       help="Output directory (relative to data/); default: data/derivatives")
+    args = parser.parse_args()
+    
     print("=== 4D DECODING PIPELINE (Self/Other x Current/Previous) ===")
     cfg, base_dir = load_config()
     
+    # Update paths to use the specified output directory
+    output_dir = args.out
+    cfg["paths"]["input_template"] = f"data/{output_dir}/" + cfg["paths"]["input_template"].split("/", 1)[1]
+    cfg["paths"]["results_dir_base"] = f"data/{output_dir}/decoding_results"
+    print(f"Using output directory: {output_dir}")
+    print(f"Loading input files from: data/{output_dir}/pair-XX_player-Y_...")
+    
     results_base = resolve_path(cfg["paths"]["results_dir_base"], base_dir)
     
-    # Get pair and players from config
-    pair = cfg["pair_player"]["pair"]
+    # Get pairs and players from config
+    valid_pair_ids = extract_pair_ids(cfg["pair_player"]["pair_ranges"])
+    target_pairs = cfg["pair_player"].get("target_pairs")
+    pairs_to_process = (
+        valid_pair_ids if not target_pairs else [p for p in valid_pair_ids if p in target_pairs]
+    )
     players = cfg["pair_player"]["players"]
     
-    print(f"\nProcessing Pair {pair:02d}, Players {players}")
+    print(f"\nProcessing {len(pairs_to_process)} pairs, Players {players}")
     print("="*60)
     
-    # LOOP OVER PLAYERS
-    for player in players:
+    # LOOP OVER PAIRS
+    for pair in pairs_to_process:
         print(f"\n{'='*60}")
-        print(f"PLAYER {player}")
+        print(f"PAIR {pair:02d}")
         print("="*60)
         
-        # Build paths for this player
-        input_file = resolve_path(
-            cfg["paths"]["input_template"].format(pair=pair, player=player),
-            base_dir
-        )
-        events_file = resolve_path(
-            cfg["paths"]["events_template"].format(pair=pair),
-            base_dir
-        )
-        
-        # Update config with current events file (for prepare_data)
-        cfg["paths"]["events_file"] = str(events_file.relative_to(base_dir))
-        
-        if not input_file.exists():
-            print(f"ERROR: Input file missing: {input_file}")
-            continue
-        if not events_file.exists():
-            print(f"ERROR: Events file missing: {events_file}")
-            continue
+        # LOOP OVER PLAYERS
+        for player in players:
+            print(f"\n{'='*60}")
+            print(f"PLAYER {player}")
+            print("="*60)
             
-        # 1. Load EEG for this player
-        print(f"  > Loading EEG for pair {pair:02d}, player {player}...")
-        epochs_base = mne.read_epochs(str(input_file), preload=True, verbose=False)
-        
-        # Create player-specific results directory
-        player_dir = results_base / f"pair-{pair:02d}_player-{player}"
-        
-        # 2. LOOP OVER TARGETS
-        targets = cfg["experiment"]["targets"]
-        
-        for target_name, target_config in targets.items():
-            print(f"\n--- Processing Target: {target_name.upper()} ---")
+            # Build paths for this player
+            input_file = resolve_path(
+                cfg["paths"]["input_template"].format(pair=pair, player=player),
+                base_dir
+            )
+            events_file = resolve_path(
+                cfg["paths"]["events_template"].format(pair=pair),
+                base_dir
+            )
             
-            # Prepare Data for this specific target (shift logic happens here)
-            X, y, times, is_dummy = prepare_data(epochs_base.copy(), cfg, base_dir, target_name, target_config, cfg.get("binning", {}))
+            # Update config with current events file (for prepare_data)
+            cfg["paths"]["events_file"] = str(events_file.relative_to(base_dir))
             
-            # Create Subfolder: pair-XX_player-Y / target_name
-            prefix = "DUMMY_" if is_dummy else ""
-            out_dir = player_dir / f"{prefix}{target_name}"
-            if out_dir.exists(): shutil.rmtree(out_dir) # Clean start
-            out_dir.mkdir(parents=True, exist_ok=True)
+            if not input_file.exists():
+                print(f"ERROR: Input file missing: {input_file}")
+                continue
+            if not events_file.exists():
+                print(f"ERROR: Events file missing: {events_file}")
+                continue
+                
+            # 1. Load EEG for this player
+            print(f"  > Loading EEG for pair {pair:02d}, player {player}...")
+            epochs_base = mne.read_epochs(str(input_file), preload=True, verbose=False)
             
-            # Run
-            title = f"pair-{pair:02d}_player-{player} {target_name} {prefix}({target_config['column']})"
-            run_models(X, y, times, cfg, out_dir, title)
+            # Create player-specific results directory
+            player_dir = results_base / f"pair-{pair:02d}_player-{player}"
+            
+            # 2. LOOP OVER TARGETS
+            targets = cfg["experiment"]["targets"]
+            
+            for target_name, target_config in targets.items():
+                print(f"\n--- Processing Target: {target_name.upper()} ---")
+                
+                # Prepare Data for this specific target (shift logic happens here)
+                X, y, times, is_dummy = prepare_data(epochs_base.copy(), cfg, base_dir, target_name, target_config, cfg.get("binning", {}))
+                
+                # Create Subfolder: pair-XX_player-Y / target_name
+                prefix = "DUMMY_" if is_dummy else ""
+                out_dir = player_dir / f"{prefix}{target_name}"
+                if out_dir.exists(): shutil.rmtree(out_dir) # Clean start
+                out_dir.mkdir(parents=True, exist_ok=True)
+                
+                # Run
+                title = f"pair-{pair:02d}_player-{player} {target_name} {prefix}({target_config['column']})"
+                run_models(X, y, times, cfg, out_dir, title, info=epochs_base.info)
         
     print("\n" + "="*60)
     print("=== ALL DONE. Check results folders. ===")
