@@ -1,0 +1,72 @@
+# config/config_preprocessing.yaml
+# -----------------------------------------------------------------------------
+# Configuration for EEG Preprocessing (Rock-Paper-Scissors Project)
+# Paper: Moerel et al., 2025
+# -----------------------------------------------------------------------------
+
+project:
+  name: "RPS_Hyperscanning_Replication"
+  authors: ""
+  description: "Step 1: Preprocessing pipeline port from FieldTrip to MNE-Python"
+
+paths:
+  # Base directory of the raw BIDS dataset
+  # Ensure this points to where you unzipped the data
+  data_root: "/Volumes/HardDiskYF/ACADEMIA/EEG/ds006761-download" 
+  
+  # Output directory for cleaned data
+  output_dir: "data/derivatives_new"
+  
+  # Path to the bad channels info file (BIDS standard)
+  participants_file: "participants.tsv"
+
+subjects:
+  # Options: 'single' (debugging) or 'all' (production)
+  run_mode: "single"
+  single_pair_id: 1
+  
+  # Pair IDs to exclude (Technical issues noted in MATLAB script comments)
+  exclude_pairs: [10, 23, 24]
+  
+  # Total range of pairs (1 to 34)
+  pair_range_start: 1
+  pair_range_end: 34
+
+processing:
+  # -------------------------------------------------------------------------
+  # Sampling & Channels
+  # -------------------------------------------------------------------------
+  montage_name: "standard_1020" # MNE has standard layouts, standard 64 biosemi is subset
+  target_sfreq: 256          # Downsampling frequency (Hz)
+  # -------------------------------------------------------------------------
+  # Channel Mapping / Swapping Logic
+  # -------------------------------------------------------------------------
+  # IMPORTANT: The MATLAB script explicitly swaps players. 
+  # Raw data 'Player 1' channels actually correspond to 'Player 2' behavior.
+  # We must replicate this swap.
+  # -------------------------------------------------------------------------
+  swap_players: true
+
+  # -------------------------------------------------------------------------
+  # Epoching
+  # -------------------------------------------------------------------------
+  # Locked to 'Decision' screen onset 
+  epoch_tmin: -0.2
+  epoch_tmax: 5.0
+  
+  # -------------------------------------------------------------------------
+  # Filtering / Rereferencing
+  # -------------------------------------------------------------------------
+  # Paper: "First, we re-referenced the data to the common average" 
+  # Note: MATLAB script step1 missed this, but we include it based on paper text.
+  apply_rereference: true
+  rereference_type: "average"
+  
+  # Paper: "We did not apply filtering" 
+  apply_filter: false
+
+  # -------------------------------------------------------------------------
+  # Artefact Correction (Interpolation)
+  # -------------------------------------------------------------------------
+  interpolate_bad_channels: true
+  interpolation_method: "spline" # More robust than 'distance' in MNE

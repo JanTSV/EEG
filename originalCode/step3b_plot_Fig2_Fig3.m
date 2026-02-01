@@ -10,7 +10,7 @@
 clearvars; clc;
 
 %% Set the path
-path_to_data = '../data';
+path_to_data = '/Volumes/HardDiskYF/ACADEMIA/EEG/ds006761-download'; %'../data';
 if ~exist(fullfile(path_to_data,'derivatives','plots'),'dir')
     mkdir(fullfile(path_to_data,'derivatives'),'plots');
 end

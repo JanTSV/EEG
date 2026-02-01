@@ -12,8 +12,10 @@
 
 %% Set the path
 clear; close all; clc
+addpath(genpath(fullfile(pwd,'helperFiles')));
+ft_defaults;
  
-path_to_data = '../data';
+path_to_data =  '/Volumes/HardDiskYF/ACADEMIA/EEG/ds006761-download'; %'../data';
 path_to_code = '../code';
 
 %% Set parameters
@@ -28,11 +30,14 @@ interpolate_bad_channels = true;
 % Set parameters
 num_trials = 480;               % There were 480 games (trials) in the experiment
 pair_ids = [1:9,11:22,25:34];   % Pair IDs (Pair 10 (major CMS issues for ppt 2), 23 (no triggers), 24 (major CMS issues for ppt 2 for first first 32 trials) were excluded)
-num_pairs = size(pair_ids,2);   % Number of pairs
+num_pairs = size(pair_ids,2); % Number of pairs
 FS = 2048;                      % Biosemi sampling frequency
 
 % Load the demographics - this has information about which channels are bad
-participants = readtable('participants.tsv','FileType','text','Delimiter','\t');
+participants = readtable(fullfile(path_to_data, 'participants.tsv'),'FileType','text','Delimiter','\t');
+% show whats inside
+head(participants)
+participants.Properties.VariableNames
 
 %% Run pre-processing 
 % Load the data. If we want to find bad channels, plot the data for visual 
@@ -40,8 +45,10 @@ participants = readtable('participants.tsv','FileType','text','Delimiter','\t');
 % to 256 Hz and save.
 
 % Loop over pairs
+fprintf("Debug - loop starting ...")
 for p = 1:num_pairs
     % Get the pair ID
+    fprintf("Debug - inside loop")
     pair = pair_ids(1,p);
     fprintf('Loading pair %.0f of %.0f\n',p,num_pairs);
 
@@ -122,10 +129,11 @@ for p = 1:num_pairs
     
         % Do we want to interpolate the bad channels?
         if interpolate_bad_channels
+            fprintf("\nDebug - inside interpolate bad channels if clause\n")
 
             % Get the channels to fix for this ppt (this information is in the
             % participants.tsv file).
-            chan_to_fix = participants(strcmp(participants.participant_id,num2str(pair,'sub-%02d')),[7,12]);
+            chan_to_fix = participants(strcmp(participants.participant_id,num2str(pair,'sub-%02d')),[6,10]); % participants(strcmp(participants.participant_id,num2str(pair,'sub-%02d')),[7,12]);
             chan_to_fix = table2cell(chan_to_fix(1,ppt));
             if ~isempty(chan_to_fix{1}) % Check if there are channels to fix
 

@@ -8,9 +8,11 @@
 %   and 24 (major CMS issues for ppt 2 - first 32 trials only)
 
 clearvars; clc;
+addpath(genpath('/Users/yannikfruehwirth/Documents/Matlab_Toolboxes/CoSMoMVPA'));
+savepath
 
 %% Set the path
-path_to_data = '../data';
+path_to_data = '/Volumes/HardDiskYF/ACADEMIA/EEG/ds006761-download'; %'../data';
 
 %% Set parameters
 pair_ids = [1:9,11:22,25:34];   % Pair IDs (Pair 10 (major CMS issues for ppt 2), 23 (no triggers), 24 (major CMS issues for ppt 2 for first first 32 trials) were excluded)

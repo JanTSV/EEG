@@ -1,0 +1,193 @@
+# -----------------------------------------------------------------------------
+# PIPELINE CONFIGURATION: Rock-Paper-Scissors EEG Replication
+# Based on Moerel et al. (2025) and original MATLAB script.
+# -----------------------------------------------------------------------------
+
+project_meta:
+  name: "RPS_Hyperscanning"
+  author: "..."
+  date: "..."
+
+paths:
+  data_root: "/Volumes/HardDiskYF/ACADEMIA/EEG/ds006761-download"     # Raw BIDS data
+  output_raw: "/Volumes/HardDiskYF/ACADEMIA/EEG/ds006761-download/derivatives_new/00_raw_fif"
+  output_conversion: "/Volumes/HardDiskYF/ACADEMIA/EEG/ds006761-download/derivatives_new/00_raw_fif" # Output of Step 0
+  output_preprocess: "/Volumes/HardDiskYF/ACADEMIA/EEG/ds006761-download/derivatives_new/01_preproc" # Output of Step 1
+  figures: "figures"                        # All plots go here
+
+subjects:
+  run_mode: "all"          # Options: 'single' or 'all'
+  single_pair_id: 1           # If run_mode is 'single'
+  exclude_pairs: [10, 23, 24] # Excluded based on MATLAB comments (technical issues)
+  pair_range: [1, 34]         # Total range of pairs
+  channel_prefix_p1: "1-"
+  channel_prefix_p1: "2-"
+
+# -----------------------------------------------------------------------------
+# STEP 0: CONVERSION & MAPPING (The "Data Wrangling" Phase)
+# Goal: Create clean .fif files with correct Channel Names and Players
+# -----------------------------------------------------------------------------
+step0_conversion:
+  # MATLAB: "Player 1: 2-A1 to 2-A32..." (The code swaps the players!)
+  # PAPER: Implicitly assumes data matches behavior.
+  # DECISION: We MUST replicate the MATLAB swap to align EEG with Behavior.
+  swap_players: true
+
+  # Channel Layout
+  montage_name: "standard_1005" # More comprehensive than 1020 (includes Iz, etc.)
+
+# -----------------------------------------------------------------------------
+# STEP 1: PREPROCESSING (The "Signal Processing" Phase)
+# Goal: Clean the signal (Interpolate, Reference, Epoch)
+# -----------------------------------------------------------------------------
+step1_preprocessing:
+  # 1. Rereferencing
+  #PAPER: "First, we re-referenced the data to the common average" [cite: 531]
+  # MATLAB: No (Missing in step1 script).
+  # DECISION: YES (Follow Paper & Physics).
+  rereference:
+    apply: true
+    type: "average"
+
+  # 2. Filtering
+  #PAPER: "We did not apply filtering" [cite: 536]
+  # DECISION: NO.
+  filter:
+    apply: false
+
+  # 3. Epoching
+  #PAPER: "locked to the onset of the Decision screen (-200ms to 5000ms)" [cite: 531]
+  epoching:
+    tmin: -0.2
+    tmax: 5.0
+    baseline: [-0.2, 0.0]
+    event_name_in_tsv: "onset_sample" # The column in events.tsv to lock to
+
+  # 4. Interpolation
+  # MATLAB: Used 'distance'.
+  # PYTHON: 'spline' is state-of-the-art for EEG.
+  interpolation:
+    apply: true
+    method: "spline"
+
+  # 5. Resampling
+  #MATLAB: Down-sample to 256 Hz [cite: 539]
+  resample:
+    sfreq: 256
+
+
+# -----------------------------------------------------------------------------
+# STEP 2: DIAGNOSIS & QUALITY CONTROL
+# Goal: Visualize phases, artifacts, and physiology without altering data.
+# -----------------------------------------------------------------------------
+diagnosis:
+  # Scientific plotting needs filtering to see ERPs (removes drift/noise just for the plot)
+  # This DOES NOT change the saved data, only the figures.
+  visual_filter:
+    apply: true
+    l_freq: 0.1  # Highpass to remove slow drifts (sweat)
+    h_freq: 30.0 # Lowpass to remove muscle/line noise
+
+  # Define Phases based on Paper (Fig 1B,)
+  # Decision (0s), Response (2s), Feedback (4s)
+  phases:
+    Decision: 0.0
+    Response: 2.0
+    Feedback: 4.0
+
+  # Regions of Interest (ROI) for Single Channel Analysis
+  # We look at specific channels to identify specific artifacts/signals
+  regions_of_interest:
+    Visual_Cortex: ['Oz', 'O1', 'O2']  # Should show VEPs (Visual Evoked Potentials)
+    Motor_Cortex:  ['C3', 'C4', 'Cz']  # Should show movement during Response
+    Frontal_Eyes:  ['Fp1', 'Fp2']      # Should show blinks/eye movements
+    Temporal_Noise: ['T7', 'T8']       # Check interpolation quality
+
+  # Timepoints for Topography Maps (in seconds)
+  # 0.1s: Early Visual Processing (P100)
+  # 0.3s: Cognitive Processing (P300)
+  # 2.5s: Motor Execution (during Response phase)
+  topo_times: [0.0, 0.1, 0.2, 0.3, 2.0, 2.5, 4.0, 4.3]
+
+
+# -----------------------------------------------------------------------------
+# STEP 3: DECODING CONFIGURATION
+# Based on Paper Methods  & MATLAB 'step2a_decoding.m' analysis
+# -----------------------------------------------------------------------------
+decoding:
+  # General Settings
+ 
+  n_folds: 10         # Paper [cite: 562] & MATLAB Line 27
+  n_repeats: 10       # Paper  & MATLAB Line 29 (n_iter)
+  
+  # Feature Extraction
+  time_bin_size: 0.25 # Paper  says 250ms. MATLAB says 0.02. WE USE PAPER.
+  
+  # Pseudo-Trials (Improving SNR)
+  use_pseudo_trials: true
+  n_pseudo_avg: 4     # Paper  & MATLAB Line 28
+  
+  # Classifier Settings
+  classifier: "LDA"
+  solver: "lsqr"      # Least squares is robust for EEG
+  shrinkage: 0.01     # Paper  (lambda=0.01) - MATLAB default differs!
+  
+  # Target Definition (from events.tsv columns)
+  # Based on your check_tsv output: 'player1_resp', 'player2_resp'
+  target_cols:
+    player_1: "player1_resp" 
+    player_2: "player2_resp"
+    
+  # Class Mapping (1=Rock, 2=Paper, 3=Scissors usually, check json if available)
+  # We assume standard mapping, but ML doesn't care as long as it distinguishes.
+  drop_nan_responses: true
+
+  targets:
+    - name: "own_current"
+      source: "self"
+      shift: 0
+    - name: "opp_current"
+      source: "opponent"
+      shift: 0
+    - name: "own_prev"
+      source: "self"
+      shift: 1  # Shift labels by 1 trial into the future (predict t-1 at trial t)
+    - name: "opp_prev"
+      source: "opponent"
+      shift: 1
+
+# -----------------------------------------------------------------------------
+# STEP 4: BEHAVIORAL ANALYSIS (Markov Chain)
+# Based on Figure 1F and Methods 
+# -----------------------------------------------------------------------------
+behavioral:
+  # Sliding Window sizes to test (Paper: 5 to 100)
+  window_min: 5
+  window_max: 100
+  window_step: 1
+  
+  # The columns in events.tsv
+  target_cols:
+    player_1: "player1_resp"
+    player_2: "player2_resp"
+  
+  # Possible moves (1=Rock, 2=Paper, 3=Scissors)
+  n_choices: 3
+
+# -----------------------------------------------------------------------------
+# EXTENSIONS: ADVANCED ANALYSES
+# -----------------------------------------------------------------------------
+extensions:
+  # 1. Hardware Optimization
+  n_jobs: -1  # Use all available CPU cores for Cross-Validation (-1 = all)
+
+  # 2. Model Comparison settings
+  models:
+    run: true
+    # List of models to run. Options: "SVM", "MLP" (LDA is already done)
+    types: ["SVM", "MLP"]
+    
+    # Hyperparameters
+    svm_kernel: "linear" # "rbf" is possible but slower
+    mlp_hidden_layers: [100] # Simple architecture for small data
+    mlp_max_iter: 1000
