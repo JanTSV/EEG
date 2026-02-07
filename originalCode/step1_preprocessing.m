@@ -201,7 +201,6 @@ for p = 1:num_pairs
                 if p == 2 && ppt == 1
                     fprintf('DEBUG: Exportiere Interpolated Data (Trial 1, Pair 2)...\n');
                     
-                    % Daten extrahieren
                     if iscell(data_epoch.trial)
                         debug_interp = data_epoch.trial{1};
                     elseif ndims(data_epoch.trial) == 3
@@ -210,12 +209,14 @@ for p = 1:num_pairs
                         error('Unbekanntes Format');
                     end
                     
-                    % WICHTIG: TRL Matrix mit exportieren für exaktes Slicing!
-                    % Wir speichern explizit als 'debug_step3_interp.mat'
-                    save('debug_step3_interp.mat', 'debug_interp', 'TRL', 'stimonsample', '-v7');
+                    % NEU: Labels exportieren, damit wir das Mapping in Python haben
+                    labels = data_epoch.label;
                     
-                    fprintf('DEBUG: Interpolated Data & TRL exported for Pair 2. Stopping.\n');
-                    return; % Hart abbrechen
+                    % Speichern (Data, TRL, Labels)
+                    save('debug_step3_interp.mat', 'debug_interp', 'TRL', 'stimonsample', 'labels', '-v7');
+                    
+                    fprintf('DEBUG: Interpolated Data, TRL & Labels exported. Stopping.\n');
+                    return; 
                 end
                 % --- DEBUG EXPORT END ---
 
@@ -258,6 +259,4 @@ for p = 1:num_pairs
 
         end % Do we want to interpolate the bad channels?
     end % Loop over the 2 ppts in the pair
-    % --- DEBUG ---
-    break
 end % Loop over pairs
