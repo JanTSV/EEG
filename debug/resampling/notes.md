@@ -1,0 +1,5 @@
+- files: debug/debug_step2.py (default resampling) & debug/debug_step2_angepasstesResampling.py
+- default resampling:
+  - debug/debug_step2.py
+  - debug/resampling/debug_step2_resample.png
+  - 

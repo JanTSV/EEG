@@ -18,6 +18,23 @@ ft_defaults;
 path_to_data =  '/Volumes/HardDiskYF/ACADEMIA/EEG/ds006761-download'; %'../data';
 path_to_code = '../code';
 
+if isempty(which('resample')) || contains(which('resample'), 'timeseries')
+    fprintf('DEBUG: Signal Toolbox fehlt! Lade FieldTrip-Fallback...\n');
+    
+    % Wir suchen den Pfad zu FieldTrip
+    ft_path = fileparts(which('ft_defaults'));
+    
+    % Wir fügen den Ordner mit den Ersatz-Funktionen hinzu
+    fallback_path = fullfile(ft_path, 'external', 'signal');
+    
+    if exist(fallback_path, 'dir')
+        addpath(fallback_path);
+        fprintf('DEBUG: Fallback geladen: %s\n', fallback_path);
+    else
+        warning('CRITICAL: FieldTrip external/signal Ordner nicht gefunden!');
+    end
+end
+
 %% Set parameters
 % If identify_bad_channels is true, we plot the data so we can identify bad 
 % channels. Skip if we've already identified bad channels and want to fix them. 
@@ -89,6 +106,30 @@ for p = 1:num_pairs
         cfg.trl = TRL;
         cfg.channel = orig_label;
         data_epoch = ft_preprocessing(cfg);
+        % --- DEBUG ---
+        %if p == 1 && ppt == 1
+            %fprintf('DEBUG: Extrahiere Trial 1 für Validierung...\n');
+            
+            % Wir holen uns nur die Daten des ersten Trials (Matrix: Channels x Time)
+            %if iscell(data_epoch.trial)
+                % Falls FieldTrip es als Cell-Array speichert
+               % debug_data = data_epoch.trial{1};
+            %elseif ndims(data_epoch.trial) == 3
+                % Falls FieldTrip es als 3D-Matrix speichert (Trials x Chan x Time)
+                %debug_data = squeeze(data_epoch.trial(1, :, :));
+            %else
+               % error('Unbekanntes Datenformat in data_epoch.trial');
+           % end
+            
+            % Speichern der kleinen Matrix (jetzt problemlos < 2GB)
+            %save('debug_step1_epoched.mat', 'debug_data', '-v7');
+            %save('debug_step1_trl.mat', 'TRL', 'stimonsample', '-v7');
+            
+            %fprintf('DEBUG: Export erfolgreich. Stoppe hier.\n');
+            %return; 
+        %end
+
+        % ---
 
         % Add the correct channel names
         layout = ft_prepare_layout(struct('layout','biosemi64.lay'));
@@ -155,6 +196,29 @@ for p = 1:num_pairs
                 cfg.elec = elec;
                 data_epoch = ft_channelrepair(cfg,data_epoch);
 
+                % --- DEBUG EXPORT STEP 3 (INTERPOLATION - SUB 02) ---
+                % Wir fangen Pair 2, Player 1 ab (der hat Bad Channels)
+                if p == 2 && ppt == 1
+                    fprintf('DEBUG: Exportiere Interpolated Data (Trial 1, Pair 2)...\n');
+                    
+                    % Daten extrahieren
+                    if iscell(data_epoch.trial)
+                        debug_interp = data_epoch.trial{1};
+                    elseif ndims(data_epoch.trial) == 3
+                        debug_interp = squeeze(data_epoch.trial(1, :, :));
+                    else 
+                        error('Unbekanntes Format');
+                    end
+                    
+                    % WICHTIG: TRL Matrix mit exportieren für exaktes Slicing!
+                    % Wir speichern explizit als 'debug_step3_interp.mat'
+                    save('debug_step3_interp.mat', 'debug_interp', 'TRL', 'stimonsample', '-v7');
+                    
+                    fprintf('DEBUG: Interpolated Data & TRL exported for Pair 2. Stopping.\n');
+                    return; % Hart abbrechen
+                end
+                % --- DEBUG EXPORT END ---
+
                 % Update
                 fprintf('pair %.0f, player %.0f: fixed %s\n',pair,ppt,chan_to_fix{1});
             end % Check if there are channels to fix
@@ -163,6 +227,27 @@ for p = 1:num_pairs
             cfg = [];
             cfg.resamplefs = 256;
             eeg_data = ft_resampledata(cfg,data_epoch);
+
+
+            % --- DEBUG EXPORT START (RESAMPLING) ---
+            %if p == 1 && ppt == 1
+                %fprintf('DEBUG: Exportiere Resampled Data (Trial 1)...\n');
+                
+                % Wir holen uns Trial 1 aus den resampleten Daten
+                %if iscell(eeg_data.trial)
+                    %debug_resamp = eeg_data.trial{1};
+                %elseif ndims(eeg_data.trial) == 3
+                    %debug_resamp = squeeze(eeg_data.trial(1, :, :));
+                %else 
+                    %error('Unbekanntes Format in eeg_data');
+                %end
+                
+                % Speichern (Format v7!)
+                %save('debug_step2_resamp.mat', 'debug_resamp', '-v7');
+                %fprintf('DEBUG: Resampled Data exported. Stopping.\n');
+                %return;
+            %end
+            % --- DEBUG EXPORT END ---
     
             % Save the epoched data (noisy channels fixed and down-sampled, no filtering)
             save(sprintf('%s/derivatives/pair-%02d_player-%01d_task-RPS_eeg.mat',path_to_data,pair,ppt),'eeg_data','-V7.3');
@@ -173,4 +258,6 @@ for p = 1:num_pairs
 
         end % Do we want to interpolate the bad channels?
     end % Loop over the 2 ppts in the pair
+    % --- DEBUG ---
+    break
 end % Loop over pairs
