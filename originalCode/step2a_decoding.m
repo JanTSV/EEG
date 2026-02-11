@@ -12,7 +12,9 @@ addpath(genpath('/Users/yannikfruehwirth/Documents/Matlab_Toolboxes/CoSMoMVPA'))
 savepath
 
 %% Set the path
+path_to_data = '/Users/yannikfruehwirth/Documents/Matlab_Toolboxes/CoSMoMVPA/ds006761';%'/Volumes/HardDiskYF/ACADEMIA/EEG/ds006761-download'; %'../data';
 path_to_data = '/Volumes/HardDiskYF/ACADEMIA/EEG/ds006761-download'; %'../data';
+
 
 %% Set parameters
 pair_ids = [1:9,11:22,25:34];   % Pair IDs (Pair 10 (major CMS issues for ppt 2), 23 (no triggers), 24 (major CMS issues for ppt 2 for first first 32 trials) were excluded)
@@ -110,6 +112,7 @@ for p = 1:num_pairs
         % We remove the first trial of each block (from behavioural data as
         % well as EEG)
         rem_idx = 1:40:480;
+
         behav_data(rem_idx,:) = [];
 
         % Do this is the EEG data as well as the behavioural data
@@ -155,6 +158,39 @@ for p = 1:num_pairs
 
         end
 
+        % --- DEBUG EXPORT STEP 2 (FEATURES) ---
+        %if p == 1 && ppt == 1
+        %    fprintf('DEBUG: Exportiere Feature Matrix für Validierung...\n');
+            
+            % 1. Die gebinnte EEG Matrix extrahieren
+            % FieldTrip speichert es als Cell Array {1 x 480}. Wir wollen eine Matrix.
+            % Da wir Trials gelöscht haben, müssen wir aufpassen.
+            
+            % Wir holen uns die Daten aus dem ft-struct
+            % Format bei binning: Channels x TimeBins
+            % Wir wollen: Trials x Channels x TimeBins
+            
+         %   num_remaining_trials = length(eeg_data.trial);
+          %  [n_chans, n_bins] = size(eeg_data.trial{1});
+            
+           % feature_matrix = zeros(num_remaining_trials, n_chans, n_bins);
+           % for t = 1:num_remaining_trials
+           %     feature_matrix(t, :, :) = eeg_data.trial{t};
+           % end
+            
+            % 2. Die Behavioral Labels (Targets)
+            % behav_data wurde oben schon bereinigt (rem_idx removed)
+           % targets = behav_data; 
+            
+            % 3. Time Axis (für Plotting/Check)
+           % time_axis = eeg_data.time{1};
+            
+            %save('debug_step2_features.mat', 'feature_matrix', 'targets', 'time_axis', '-v7');
+            %fprintf('DEBUG: Features & Targets exported. Stopping.\n');
+           % return;
+        % end
+        % --- DEBUG EXPORT END ---
+
         %% Convert the data from fieldtrip to cosmomvpa format
         cfg = [];
         cfg.keeptrials = 'yes';
@@ -198,6 +234,21 @@ for p = 1:num_pairs
             % average 4 random samples together and repeat this 20 times.
             ds_sel = cosmo_average_samples(ds_sel,'count',4,'repeats',20,'seed',1);
 
+            % --- DEBUG EXPORT STEP 2c (SUPER TRIALS) ---
+            if p == 1 && ppt == 1 && test == 1 % Nur für erstes Target (Self)
+                fprintf('DEBUG: Exportiere Averaged Super-Trials...\n');
+                
+                % Cosmo Dataset extrahieren
+                super_trials = ds_sel.samples;      % (n_samples x n_features)
+                super_targets = ds_sel.sa.targets;  % Labels
+                super_chunks = ds_sel.sa.chunks;    % Cross-Validation Folds
+                
+                save('debug_step2c_supertrials.mat', 'super_trials', 'super_targets', 'super_chunks', '-v7');
+                fprintf('DEBUG: Super-Trials exported. Stopping.\n');
+                return;
+            end
+            % --- DEBUG EXPORT END ---
+
             % define the neighbourhood (individual timepoints)
             nh = cosmo_interval_neighborhood(ds_sel,'time','radius',0);
 
@@ -237,6 +288,15 @@ for p = 1:num_pairs
                 
             % Save the decoding accuracy
             searchlight_acc{test} = res_sl;
+
+            % --- DEBUG EXPORT STEP 2b (DECODING RESULTS) ---
+            if p == 1 && ppt == 1
+                fprintf('DEBUG: Exportiere Decoding Results für P1/P1...\n');
+                save('debug_step2b_results.mat', 'decoding_accuracy', 'searchlight_acc', '-v7');
+                fprintf('DEBUG: Results exported. Stopping.\n');
+                return;
+            end
+            % --- DEBUG EXPORT END ---
 
         end % Loop over the things to decode
 
