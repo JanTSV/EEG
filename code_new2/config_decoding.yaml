@@ -1,0 +1,78 @@
+# config/decoding_config.yaml
+# -----------------------------------------------------------------------------
+# EEG Decoding Configuration (Production V2)
+# -----------------------------------------------------------------------------
+
+paths:
+  bids_root: "/Volumes/HardDiskYF/ACADEMIA/EEG/ds006761-download"
+  deriv_root: "/Volumes/HardDiskYF/ACADEMIA/EEG/derivatives_new2"
+  results_dir: "results_decoding"
+  figures_dir: "figures_decoding"
+
+subjects:
+  # Liste aller validen Subjects (Bad subjects 10, 23, 24 ausgeschlossen)
+  include: [1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34]
+  # include: [1, 2, 3, 4, 5 ]
+
+params:
+  task_name: "RPS"
+  
+  # --- Feature Extraction ---
+  bin_width: 0.25
+  baseline_window: 0.2
+  part_a_tmin: -0.2
+  part_a_tmax: 2.0
+  part_b_tmin: 1.8
+  part_b_tmax: 4.0
+  part_c_tmin: 3.8
+  part_c_tmax: 5.0
+
+  # --- Decoding Strategy ---
+  n_folds: 10
+  n_super_trials: 4
+  n_repeats: 20  # Für Production auf 20 lassen (Matlab Standard)
+
+# --- NEU: DATA CLEANING ---
+cleaning:
+  # Welche Antworten sollen ignoriert werden?
+  # 0 = No Response (Missed Trial) -> Verursachte den Fehler!
+  drop_values: [0]
+  # Minimale Anzahl an Super-Trials pro Klasse, damit Decoding startet
+  min_trials_per_class: 5
+
+# --- NEU: PLOTTING DEFAULTS ---
+plotting:
+  # Y-Achsen Skalierung für Accuracy Plots
+  y_min: 25
+  y_max: 42
+  chance_level: 33.33
+  
+  # Farben für die Phasen (Decision, Response, Feedback)
+  colors:
+    phase_bg: "#e0e0e0"
+    line_mean: "#2b7bba"
+    line_chance: "#333333"
+
+# --- NEU: TARGET DEFINITION ---
+# Wir definieren hier ALLE 5 Hypothesen aus dem Matlab Paper
+targets:
+  - name: "Self_Response"
+    column_index: 0      # P1 Response
+    type: "response"     # Klassifizierungstyp
+    
+  - name: "Other_Response"
+    column_index: 1      # P2 Response
+    type: "response"
+    
+  - name: "Outcome"
+    column_index: 2      # Win/Lose/Draw
+    type: "outcome"
+
+  # Dynamisch berechnete Targets (werden im Code erzeugt)
+  - name: "Prev_Self_Response"
+    source: "Self_Response"
+    shift: 1             # 1 Trial zurück
+    
+  - name: "Prev_Other_Response"
+    source: "Other_Response"
+    shift: 1
