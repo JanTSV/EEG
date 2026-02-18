@@ -115,8 +115,8 @@ class EEGPipeline:
             raise NotImplementedError("Filtering is NOT enabled/validated in this pipeline version.")
         if gr.get('allow_rereference'):
             raise NotImplementedError("Re-referencing (CAR) is NOT enabled/validated.")
-        if gr.get('allow_ica'):
-            raise NotImplementedError("ICA is NOT enabled/validated.")
+
+        self.allow_ica = gr.get('allow_ica', False)
 
     def get_subjects(self):
         return self.cfg['subjects']['include']
@@ -187,7 +187,62 @@ class EEGPipeline:
         montage = mne.channels.make_standard_montage('standard_1020')
         raw.set_montage(montage, on_missing='warn')
 
-        # 4. EPOCHING
+        # 4. ICA
+        if self.allow_ica:
+            # Average reference (required for ICA)
+            # TODO: Maybe not copy again
+            raw_copy = raw.copy()
+            raw_copy.set_eeg_reference("average", projection=False)
+
+            # Interpolate bad channels
+            bad_channels = self.get_bad_channels(sub_id)
+            valid_bads = [b for b in bad_channels if b in raw_copy.ch_names]
+            if valid_bads:
+                print(f"   Interpolating bad channels before ICA: {valid_bads}")
+                raw_copy.info["bads"] = valid_bads
+                raw_copy.interpolate_bads(reset_bads=True, verbose='error')
+            else:
+                print("   No bad channels to interpolate.")
+            
+            # Downsampling for speedup
+            ica_sfreq = 256
+            print(f"   Downsampling to {ica_sfreq} Hz for ICA...")
+            raw_copy.resample(ica_sfreq)
+
+            # High-pass for ICA, see runtime warning:
+            # RuntimeWarning: The data has not been high-pass filtered. For good ICA performance, it should be high-pass filtered (e.g., with a 1.0 Hz lower bound) before fitting ICA.
+            raw_copy = raw_copy.filter(l_freq=1.0, h_freq=None)
+
+            ica = mne.preprocessing.ICA(
+                n_components=20,
+                method="fastica",
+                random_state=42,
+                max_iter="auto"
+            )
+            ica.fit(raw_copy, picks="eeg")
+
+            # Auto-detect EOG artifacts: uses frontal channels as proxy for eye activity
+            # Threshold=3.0: standard; higher = stricter (fewer components excluded)
+            try:
+                # Use frontal EEG channels as proxies for EOG
+                frontal_chs = [ch for ch in ['Fp1', 'Fp2', 'AF7', 'AF8'] if ch in raw_copy.ch_names]
+
+                # Find bad EOG components
+                eog_indices, eog_scores = ica.find_bads_eog(raw_copy, ch_name=frontal_chs, threshold=3.0)
+                ica.exclude = eog_indices
+                if eog_indices:
+                    print(f"    ICA detected {len(eog_indices)} EOG component(s): {eog_indices}")
+            except RuntimeError:
+                print("    No EOG channels found; skipping automatic EOG detection")
+
+            # Apply ICA: removes marked artifact components from raw signal (in-place)
+            if ica.exclude:
+                ica.apply(raw)  # IMPORTANT: apply to raw now
+                print(f"    ICA applied, removed {len(ica.exclude)} component(s)")
+            else:
+                print("    No artifacts detected by ICA")
+
+        # 5. EPOCHING
         print("   Epoching...")
         events_df = pd.read_csv(events_path, sep='\t')
         
@@ -204,7 +259,7 @@ class EEGPipeline:
         epochs = mne.Epochs(raw, events, tmin=tmin, tmax=tmax, 
                             baseline=None, preload=True, verbose='error')
         
-        # 5. INTERPOLATION
+        # 6. INTERPOLATION
         bads_1020 = self.get_bad_channels(sub_id)
         # Ensure bad names match current 10-20 names
         valid_bads = [b for b in bads_1020 if b in epochs.ch_names]
@@ -226,7 +281,7 @@ class EEGPipeline:
         else:
             print("   No bad channels to interpolate.")
 
-        # 6. RESAMPLING
+        # 7. RESAMPLING
         print("   Resampling...")
         if self.cfg['params']['resample_method'] == 'polyphase':
             epochs = resample_polyphase(epochs, self.cfg['params']['target_fs'], 
@@ -235,10 +290,10 @@ class EEGPipeline:
             # Fallback / Guardrail check failed
             raise NotImplementedError("Only polyphase resampling is enabled.")
 
-        # 7. QC REPORT
+        # 8. QC REPORT
         self._generate_report(epochs, sub_str)
 
-        # 8. SAVE
+        # 9. SAVE
         out_fname = self.out_dir / f"{sub_str}_task-RPS_desc-preproc_eeg.fif"
         print(f"   Saving to {out_fname}...")
         epochs.save(out_fname, overwrite=True, verbose='error')
