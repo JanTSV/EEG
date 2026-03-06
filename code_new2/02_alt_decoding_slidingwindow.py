@@ -13,6 +13,7 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.pipeline import make_pipeline
 from sklearn.metrics import accuracy_score
 from sklearn.base import BaseEstimator, ClassifierMixin
+from mne.decoding import SlidingEstimator
 
 # PyTorch Imports
 import torch
@@ -261,6 +262,8 @@ class Decoder:
         # --- 2. DECODING LOOP ---
         for model_name, clf in self.pipelines.items():
             print(f"      Running model: {model_name}")
+            slider = SlidingEstimator(clf, scoring='accuracy', n_jobs=1, verbose=False)
+            
             for r in range(self.n_repeats):
                 X_avg, y_avg = self._create_super_trials(X_clean, y_clean, seed=r)
                 
@@ -272,16 +275,11 @@ class Decoder:
                 
                 cv = StratifiedKFold(n_splits=self.n_folds, shuffle=True, random_state=r)
                 
-                for b in range(n_bins):
-                    X_bin = X_avg[:, :, b]
-                    fold_accs = []
+                for f_idx, (train, test) in enumerate(cv.split(X_avg[:, 0, 0], y_avg)):
+                    slider.fit(X_avg[train], y_avg[train])
+                    scores = slider.score(X_avg[test], y_avg[test])
                     
-                    for train, test in cv.split(X_bin, y_avg):
-                        clf.fit(X_bin[train], y_avg[train])
-                        pred = clf.predict(X_bin[test])
-                        fold_accs.append(accuracy_score(y_avg[test], pred))
-                    
-                    for f_idx, acc in enumerate(fold_accs):
+                    for b, acc in enumerate(scores):
                         all_results.append({
                             'model': model_name,
                             'repeat': r,

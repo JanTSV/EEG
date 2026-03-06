@@ -346,7 +346,7 @@ class EEGPipeline:
 
 if __name__ == "__main__":
     # Config Path
-    config_file = "config_preprocessing.yaml"
+    config_file = "/home/miliczpl/MySSD/Code/EEG/code_new2/config_preprocessing.yaml"
     
     pipeline = EEGPipeline(config_file)
     pipeline.run()

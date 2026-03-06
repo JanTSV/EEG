@@ -4,10 +4,10 @@
 # -----------------------------------------------------------------------------
 
 paths:
-  bids_root: "/Volumes/HardDiskYF/ACADEMIA/EEG/ds006761-download"
-  deriv_root: "/Volumes/HardDiskYF/ACADEMIA/EEG/derivatives_new2"
-  results_dir: "results_decoding"
-  figures_dir: "figures_decoding"
+  bids_root: "/home/miliczpl/MySSD/Code/EEG/data"
+  deriv_root: "/home/miliczpl/MySSD/Code/EEG/data/derivatives_new2"
+  results_dir: "/home/miliczpl/MySSD/Code/EEG/data/derivatives_new2/results_decoding"
+  figures_dir: "/home/miliczpl/MySSD/Code/EEG/data/derivatives_new2/figures_decoding"
 
 subjects:
   # Liste aller validen Subjects (Bad subjects 10, 23, 24 ausgeschlossen)
@@ -76,3 +76,22 @@ targets:
   - name: "Prev_Other_Response"
     source: "Other_Response"
     shift: 1
+# --- MODELS ---
+# Choose which machine learning models to run over the time bins
+models:
+  lda:
+    enabled: true
+  svm:
+    enabled: true
+    C: 1.0
+    kernel: "linear"
+  mlp:
+    enabled: true
+    hidden_layer_sizes: [64, 32]
+    max_iter: 1000
+  eegnet:
+    enabled: true
+    hidden_dim: 64
+    epochs: 50
+    learning_rate: 0.001
+    batch_size: 32
