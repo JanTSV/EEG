@@ -263,6 +263,49 @@ def plot_fig3(df, out_dir, model_name):
     plt.close()
 
 
+def plot_model_comparison(df, out_dir):
+    print("Plotting Model Comparison...")
+    targets = [t for t in PLOT_TARGETS if t in df["target"].unique()]
+    fig = plt.figure(figsize=(9, 3.5 * len(targets)))
+    gs = gridspec.GridSpec(len(targets), 1, hspace=0.35)
+
+    for i, tgt in enumerate(targets):
+        df_t = df[df["target"] == tgt]
+        
+        ax = plt.subplot(gs[i])
+        ax.set_ylim(31, 40)
+        ax.set_ylabel("Accuracy (%)")
+        style_phase_background(ax)
+        ax.axhline(CHANCE_LEVEL, color=COLORS["chance"], linestyle="--", lw=1.5, zorder=2)
+        
+        sns.lineplot(
+            data=df_t,
+            x="time_bin",
+            y="accuracy",
+            hue="model",
+            ax=ax,
+            linewidth=2.5,
+            marker="o",
+            markersize=6,
+            errorbar=("ci", 95),
+            zorder=3,
+        )
+        
+        ax.set_title(f"{chr(65 + i)}) {tgt.replace('_', ' ')}", loc="left", fontweight="bold", pad=10)
+        ax.set_xlim(-0.5, 19.5)
+        if i == len(targets) - 1:
+            ax.set_xlabel("Time Bins")
+        else:
+            ax.set_xlabel("")
+            ax.set_xticklabels([])
+            
+        ax.legend(loc="upper right", fontsize=9, framealpha=0.9, title="Model")
+
+    plt.tight_layout()
+    plt.savefig(out_dir / "Figure_Model_Comparison.png", dpi=300)
+    plt.close()
+
+
 def run():
     cfg = load_config()
     res_dir = Path(cfg['paths']['results_dir'])
@@ -270,6 +313,11 @@ def run():
     fig_dir.mkdir(parents=True, exist_ok=True)
     try:
         df_all = aggregate_data(res_dir)
+        
+        # Plot grand average comparison of all models
+        if len(df_all["model"].unique()) > 1:
+            plot_model_comparison(df_all, fig_dir)
+            
         models = df_all['model'].unique()
         for model in models:
             df_model = df_all[df_all['model'] == model]

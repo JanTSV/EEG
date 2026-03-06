@@ -13,6 +13,9 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.pipeline import make_pipeline
 from sklearn.metrics import accuracy_score
 from sklearn.base import BaseEstimator, ClassifierMixin
+from sklearn.base import clone
+from joblib import Parallel, delayed
+from mne.decoding import SlidingEstimator
 
 # PyTorch Imports
 import torch
@@ -57,6 +60,7 @@ class PyTorchEstimator(BaseEstimator, ClassifierMixin):
         y_t = torch.LongTensor(y_mapped)
         
         self.model_ = SimpleEEGNet(input_dim, self.hidden_dim, n_classes)
+            
         optimizer = optim.Adam(self.model_.parameters(), lr=self.lr)
         criterion = nn.CrossEntropyLoss()
         
@@ -197,16 +201,21 @@ class Decoder:
         self.models_cfg = config.get('models', {'lda': {'enabled': True}})
         
         self.pipelines = {}
+        self.sliding_window_flags = {}
+        
         if self.models_cfg.get('lda', {}).get('enabled', False):
             self.pipelines['lda'] = make_pipeline(StandardScaler(), LinearDiscriminantAnalysis(solver='lsqr', shrinkage='auto'))
+            self.sliding_window_flags['lda'] = self.models_cfg.get('lda', {}).get('use_sliding_window', False)
             
         if self.models_cfg.get('svm', {}).get('enabled', False):
             m_cfg = self.models_cfg['svm']
             self.pipelines['svm'] = make_pipeline(StandardScaler(), SVC(C=m_cfg.get('C', 1.0), kernel=m_cfg.get('kernel', 'linear')))
+            self.sliding_window_flags['svm'] = m_cfg.get('use_sliding_window', False)
             
         if self.models_cfg.get('mlp', {}).get('enabled', False):
             m_cfg = self.models_cfg['mlp']
             self.pipelines['mlp'] = make_pipeline(StandardScaler(), MLPClassifier(hidden_layer_sizes=tuple(m_cfg.get('hidden_layer_sizes', [64, 32])), max_iter=m_cfg.get('max_iter', 1000)))
+            self.sliding_window_flags['mlp'] = m_cfg.get('use_sliding_window', False)
             
         if self.models_cfg.get('eegnet', {}).get('enabled', False):
             m_cfg = self.models_cfg['eegnet']
@@ -216,10 +225,12 @@ class Decoder:
                 lr=m_cfg.get('learning_rate', 0.001),
                 batch_size=m_cfg.get('batch_size', 32)
             ))
+            self.sliding_window_flags['eegnet'] = m_cfg.get('use_sliding_window', False)
             
         if not self.pipelines:
             print("[WARN] No models enabled in config! Defaulting to LDA.")
             self.pipelines['lda'] = make_pipeline(StandardScaler(), LinearDiscriminantAnalysis(solver='lsqr', shrinkage='auto'))
+            self.sliding_window_flags['lda'] = False
 
     def _create_super_trials(self, X, y, seed):
         rng = np.random.RandomState(seed)
@@ -238,6 +249,56 @@ class Decoder:
                 y_new.append(cls)
                 
         return np.array(X_new), np.array(y_new)
+
+    def _run_single_repeat(self, r, X_clean, y_clean, clf, model_name, n_bins):
+        import torch
+        torch.set_num_threads(1)
+        results = []
+        X_avg, y_avg = self._create_super_trials(X_clean, y_clean, seed=r)
+        
+        u_avg, c_avg = np.unique(y_avg, return_counts=True)
+        if len(c_avg) < 2 or min(c_avg) < self.n_folds:
+            if r == 0: 
+                print(f"        [WARN] Not enough super-trials for CV. Counts: {dict(zip(u_avg, c_avg))}")
+            return results
+        
+        cv = StratifiedKFold(n_splits=self.n_folds, shuffle=True, random_state=r)
+        use_sliding_window = self.sliding_window_flags.get(model_name, False)
+        
+        if use_sliding_window:
+            slider = SlidingEstimator(clone(clf), scoring='accuracy', n_jobs=1, verbose=False)
+            for f_idx, (train, test) in enumerate(cv.split(X_avg[:, 0, 0], y_avg)):
+                slider.fit(X_avg[train], y_avg[train])
+                scores = slider.score(X_avg[test], y_avg[test])
+                
+                for b, acc in enumerate(scores):
+                    results.append({
+                        'model': model_name,
+                        'repeat': r,
+                        'fold': f_idx,
+                        'time_bin': b,
+                        'accuracy': acc
+                    })
+        else:
+            for b in range(n_bins):
+                X_bin = X_avg[:, :, b]
+                fold_accs = []
+                
+                for train, test in cv.split(X_bin, y_avg):
+                    my_clf = clone(clf)
+                    my_clf.fit(X_bin[train], y_avg[train])
+                    pred = my_clf.predict(X_bin[test])
+                    fold_accs.append(accuracy_score(y_avg[test], pred))
+                
+                for f_idx, acc in enumerate(fold_accs):
+                    results.append({
+                        'model': model_name,
+                        'repeat': r,
+                        'fold': f_idx,
+                        'time_bin': b,
+                        'accuracy': acc
+                    })
+        return results
 
     def run(self, X, y):
         # --- 1. DATA CLEANING (The Fix) ---
@@ -261,34 +322,13 @@ class Decoder:
         # --- 2. DECODING LOOP ---
         for model_name, clf in self.pipelines.items():
             print(f"      Running model: {model_name}")
-            for r in range(self.n_repeats):
-                X_avg, y_avg = self._create_super_trials(X_clean, y_clean, seed=r)
-                
-                u_avg, c_avg = np.unique(y_avg, return_counts=True)
-                if len(c_avg) < 2 or min(c_avg) < self.n_folds:
-                    if r == 0: 
-                        print(f"        [WARN] Not enough super-trials for CV. Counts: {dict(zip(u_avg, c_avg))}")
-                    continue
-                
-                cv = StratifiedKFold(n_splits=self.n_folds, shuffle=True, random_state=r)
-                
-                for b in range(n_bins):
-                    X_bin = X_avg[:, :, b]
-                    fold_accs = []
-                    
-                    for train, test in cv.split(X_bin, y_avg):
-                        clf.fit(X_bin[train], y_avg[train])
-                        pred = clf.predict(X_bin[test])
-                        fold_accs.append(accuracy_score(y_avg[test], pred))
-                    
-                    for f_idx, acc in enumerate(fold_accs):
-                        all_results.append({
-                            'model': model_name,
-                            'repeat': r,
-                            'fold': f_idx,
-                            'time_bin': b,
-                            'accuracy': acc
-                        })
+            
+            repeat_results = Parallel(n_jobs=-1)(
+                delayed(self._run_single_repeat)(r, X_clean, y_clean, clf, model_name, n_bins)
+                for r in range(self.n_repeats)
+            )
+            for res_list in repeat_results:
+                all_results.extend(res_list)
                         
         if not all_results: return None
         return pd.DataFrame(all_results)

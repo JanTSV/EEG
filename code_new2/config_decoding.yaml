@@ -6,8 +6,8 @@
 paths:
   bids_root: "/home/miliczpl/MySSD/Code/EEG/data"
   deriv_root: "/home/miliczpl/MySSD/Code/EEG/data/derivatives_new2"
-  results_dir: "/home/miliczpl/MySSD/Code/EEG/data/derivatives_new2/results_decoding"
-  figures_dir: "/home/miliczpl/MySSD/Code/EEG/data/derivatives_new2/figures_decoding"
+  results_dir: "/home/miliczpl/MySSD/Code/EEG/data/derivatives_sliding_window/results_decoding_eegnet"
+  figures_dir: "/home/miliczpl/MySSD/Code/EEG/data/derivatives_sliding_window/figures_decoding_eegnet"
 
 subjects:
   # Liste aller validen Subjects (Bad subjects 10, 23, 24 ausgeschlossen)
@@ -81,16 +81,20 @@ targets:
 models:
   lda:
     enabled: true
+    use_sliding_window: false  # LDA is so fast, manual loop or sliding window both work instantly
   svm:
     enabled: true
+    use_sliding_window: false
     C: 1.0
     kernel: "linear"
   mlp:
     enabled: true
+    use_sliding_window: true   # Huge speedup for SLP/MLP
     hidden_layer_sizes: [64, 32]
     max_iter: 1000
   eegnet:
     enabled: true
+    use_sliding_window: true   # Huge speedup since it trains over PyTorch Epochs
     hidden_dim: 64
     epochs: 50
     learning_rate: 0.001
