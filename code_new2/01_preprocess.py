@@ -221,6 +221,12 @@ class EEGPipeline:
             )
             ica.fit(raw_copy, picks="eeg")
 
+            # Plot ICA topos
+            print("   Plotting ICA topographies...")
+            fig = ica.plot_components(inst=raw_copy, show=False)
+            fig.savefig(self.report_dir / f"{sub_str}_ica_components.png")
+            plt.close(fig)
+
             # Auto-detect EOG artifacts: uses frontal channels as proxy for eye activity
             # Threshold=3.0: standard; higher = stricter (fewer components excluded)
             try:
@@ -237,6 +243,13 @@ class EEGPipeline:
 
             # Apply ICA: removes marked artifact components from raw signal (in-place)
             if ica.exclude:
+                # Plot excluded topos
+                print("   Plotting excluded ICA topos...")
+                figs = ica.plot_properties(raw_copy, picks=ica.exclude, show=False)
+                for i, f in enumerate(figs):
+                    f.savefig(self.report_dir / f"{sub_str}_ica_bad_comp_{i}.png")
+                    plt.close(f)
+
                 ica.apply(raw)  # IMPORTANT: apply to raw now
                 print(f"    ICA applied, removed {len(ica.exclude)} component(s)")
             else:
