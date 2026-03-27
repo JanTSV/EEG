@@ -8,6 +8,7 @@ from pathlib import Path
 from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
 from sklearn.svm import SVC
 from sklearn.neural_network import MLPClassifier
+from sklearn.linear_model import LogisticRegression, RidgeClassifier
 from sklearn.model_selection import StratifiedKFold
 from sklearn.preprocessing import StandardScaler
 from sklearn.pipeline import make_pipeline
@@ -23,9 +24,9 @@ import torch.nn as nn
 import torch.optim as optim
 
 # =============================================================================
-# PyTorch Estimator (Ported from code/decoding.py)
+# PyTorch Estimator (Simple MLP to compare with linear models)
 # =============================================================================
-class SimpleEEGNet(nn.Module):
+class TorchMLP(nn.Module):
     def __init__(self, input_dim, hidden_dim, n_classes):
         super().__init__()
         self.net = nn.Sequential(
@@ -35,10 +36,13 @@ class SimpleEEGNet(nn.Module):
             nn.Linear(hidden_dim, n_classes)
         )
     def forward(self, x):
+        # Flatten if input is 3D
+        if x.dim() > 2:
+            x = x.view(x.size(0), -1)
         return self.net(x)
 
 class PyTorchEstimator(BaseEstimator, ClassifierMixin):
-    def __init__(self, hidden_dim=64, lr=0.001, epochs=10, batch_size=32):
+    def __init__(self, hidden_dim=64, lr=0.001, epochs=50, batch_size=32):
         self.hidden_dim = hidden_dim
         self.lr = lr
         self.epochs = epochs
@@ -49,7 +53,6 @@ class PyTorchEstimator(BaseEstimator, ClassifierMixin):
 
     def fit(self, X, y):
         self.classes_ = np.unique(y)
-        input_dim = X.shape[1]
         n_classes = len(self.classes_)
         
         X_t = torch.FloatTensor(X)
@@ -59,7 +62,11 @@ class PyTorchEstimator(BaseEstimator, ClassifierMixin):
         y_mapped = np.array([self.label_map_[val] for val in y])
         y_t = torch.LongTensor(y_mapped)
         
-        self.model_ = SimpleEEGNet(input_dim, self.hidden_dim, n_classes)
+        channels = X.shape[1]
+        samples = X.shape[2] if len(X.shape) > 2 else 1
+        input_dim = channels * samples
+        
+        self.model_ = TorchMLP(input_dim, self.hidden_dim, n_classes)
             
         optimizer = optim.Adam(self.model_.parameters(), lr=self.lr)
         criterion = nn.CrossEntropyLoss()
@@ -212,21 +219,26 @@ class Decoder:
             self.pipelines['svm'] = make_pipeline(StandardScaler(), SVC(C=m_cfg.get('C', 1.0), kernel=m_cfg.get('kernel', 'linear')))
             self.sliding_window_flags['svm'] = m_cfg.get('use_sliding_window', False)
             
-        if self.models_cfg.get('mlp', {}).get('enabled', False):
-            m_cfg = self.models_cfg['mlp']
-            self.pipelines['mlp'] = make_pipeline(StandardScaler(), MLPClassifier(hidden_layer_sizes=tuple(m_cfg.get('hidden_layer_sizes', [64, 32])), max_iter=m_cfg.get('max_iter', 1000)))
-            self.sliding_window_flags['mlp'] = m_cfg.get('use_sliding_window', False)
-            
-        if self.models_cfg.get('eegnet', {}).get('enabled', False):
-            m_cfg = self.models_cfg['eegnet']
-            self.pipelines['eegnet'] = make_pipeline(StandardScaler(), PyTorchEstimator(
+        if self.models_cfg.get('logreg', {}).get('enabled', False):
+            m_cfg = self.models_cfg['logreg']
+            self.pipelines['logreg'] = make_pipeline(StandardScaler(), LogisticRegression(C=m_cfg.get('C', 1.0), solver='lbfgs', max_iter=1000))
+            self.sliding_window_flags['logreg'] = m_cfg.get('use_sliding_window', False)
+
+        if self.models_cfg.get('ridge', {}).get('enabled', False):
+            m_cfg = self.models_cfg['ridge']
+            self.pipelines['ridge'] = make_pipeline(StandardScaler(), RidgeClassifier(alpha=m_cfg.get('alpha', 1.0)))
+            self.sliding_window_flags['ridge'] = m_cfg.get('use_sliding_window', False)
+
+        if self.models_cfg.get('torch_mlp', {}).get('enabled', False):
+            m_cfg = self.models_cfg['torch_mlp']
+            self.pipelines['torch_mlp'] = make_pipeline(StandardScaler(), PyTorchEstimator(
                 hidden_dim=m_cfg.get('hidden_dim', 64), 
                 epochs=m_cfg.get('epochs', 50), 
                 lr=m_cfg.get('learning_rate', 0.001),
                 batch_size=m_cfg.get('batch_size', 32)
             ))
-            self.sliding_window_flags['eegnet'] = m_cfg.get('use_sliding_window', False)
-            
+            self.sliding_window_flags['torch_mlp'] = m_cfg.get('use_sliding_window', True)
+
         if not self.pipelines:
             print("[WARN] No models enabled in config! Defaulting to LDA.")
             self.pipelines['lda'] = make_pipeline(StandardScaler(), LinearDiscriminantAnalysis(solver='lsqr', shrinkage='auto'))

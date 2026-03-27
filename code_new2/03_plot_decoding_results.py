@@ -123,8 +123,11 @@ def style_phase_background(ax):
             )
 
 
-def plot_fig2(df, out_dir, model_name):
+def plot_fig2(df, out_dir, model_name, cfg):
     print(f"Plotting Figure 2 (Polished) for {model_name}...")
+    
+    y_min = cfg['plotting'].get('y_min', 25)
+    y_max = cfg['plotting'].get('y_max', 45)
     
     targets = [t for t in PLOT_TARGETS if t in df["target"].unique()]
     fig = plt.figure(figsize=(9, 3.5 * len(targets)))
@@ -139,7 +142,7 @@ def plot_fig2(df, out_dir, model_name):
 
         # Main
         ax = plt.subplot(gs[2 * i])
-        ax.set_ylim(31, 40)  # Set limits BEFORE styling to place text correctly
+        ax.set_ylim(y_min, y_max)  # Set limits BEFORE styling to place text correctly
         ax.set_ylabel("Accuracy (%)")
         style_phase_background(ax)
 
@@ -181,8 +184,11 @@ def plot_fig2(df, out_dir, model_name):
     plt.close()
 
 
-def plot_fig3(df, out_dir, model_name):
+def plot_fig3(df, out_dir, model_name, cfg):
     print(f"Plotting Figure 3 (Polished Split) for {model_name}...")
+    
+    y_min = cfg['plotting'].get('y_min', 25)
+    y_max = cfg['plotting'].get('y_max', 45)
     
     if len(df["player_status"].unique()) < 2:
         return
@@ -201,7 +207,7 @@ def plot_fig3(df, out_dir, model_name):
 
         # Main
         ax = plt.subplot(gs[base])
-        ax.set_ylim(31, 40)
+        ax.set_ylim(y_min, y_max)
         ax.set_ylabel("Accuracy (%)")
         style_phase_background(ax)
         ax.axhline(CHANCE_LEVEL, color=COLORS["chance"], linestyle="--", zorder=2)
@@ -263,8 +269,12 @@ def plot_fig3(df, out_dir, model_name):
     plt.close()
 
 
-def plot_model_comparison(df, out_dir):
+def plot_model_comparison(df, out_dir, cfg):
     print("Plotting Model Comparison...")
+    
+    y_min = cfg['plotting'].get('y_min', 25)
+    y_max = cfg['plotting'].get('y_max', 45)
+    
     targets = [t for t in PLOT_TARGETS if t in df["target"].unique()]
     fig = plt.figure(figsize=(9, 3.5 * len(targets)))
     gs = gridspec.GridSpec(len(targets), 1, hspace=0.35)
@@ -273,7 +283,7 @@ def plot_model_comparison(df, out_dir):
         df_t = df[df["target"] == tgt]
         
         ax = plt.subplot(gs[i])
-        ax.set_ylim(31, 40)
+        ax.set_ylim(y_min, y_max)
         ax.set_ylabel("Accuracy (%)")
         style_phase_background(ax)
         ax.axhline(CHANCE_LEVEL, color=COLORS["chance"], linestyle="--", lw=1.5, zorder=2)
@@ -316,13 +326,13 @@ def run():
         
         # Plot grand average comparison of all models
         if len(df_all["model"].unique()) > 1:
-            plot_model_comparison(df_all, fig_dir)
+            plot_model_comparison(df_all, fig_dir, cfg)
             
         models = df_all['model'].unique()
         for model in models:
             df_model = df_all[df_all['model'] == model]
-            plot_fig2(df_model, fig_dir, model)
-            plot_fig3(df_model, fig_dir, model)
+            plot_fig2(df_model, fig_dir, model, cfg)
+            plot_fig3(df_model, fig_dir, model, cfg)
     except Exception as e: print(e)
 
 if __name__ == "__main__":
