@@ -164,22 +164,147 @@ def aggregate_haufe_data(results_dir):
     )
 
 
-def _select_pattern_component(df_haufe_t):
-    """Select one stable Haufe component for plotting (avoid mixing multiclass rows)."""
+def _safe_corr(a, b):
+    if a is None or b is None:
+        return np.nan
+    if np.std(a) <= 1e-12 or np.std(b) <= 1e-12:
+        return np.nan
+    r = np.corrcoef(a, b)[0, 1]
+    return float(r) if np.isfinite(r) else np.nan
+
+
+def _split_half_reliability(subject_maps, rng, n_iter=60):
+    """subject_maps shape: (n_subjects, n_channels)."""
+    n_sub = subject_maps.shape[0]
+    if n_sub < 4:
+        return np.nan
+
+    # Sign alignment to global reference
+    ref = np.mean(subject_maps, axis=0)
+    aligned = subject_maps.copy()
+    for i in range(n_sub):
+        if np.dot(aligned[i], ref) < 0:
+            aligned[i] *= -1.0
+
+    vals = []
+    idx = np.arange(n_sub)
+    half = n_sub // 2
+    if half < 2:
+        return np.nan
+
+    for _ in range(n_iter):
+        perm = rng.permutation(idx)
+        a = perm[:half]
+        b = perm[half: 2 * half]
+        ma = np.mean(aligned[a], axis=0)
+        mb = np.mean(aligned[b], axis=0)
+        r = _safe_corr(ma, mb)
+        if np.isfinite(r):
+            vals.append(r)
+
+    if not vals:
+        return np.nan
+    return float(np.median(vals))
+
+
+def _zscore_series(x):
+    x = np.asarray(x, dtype=float)
+    mu = np.nanmean(x)
+    sd = np.nanstd(x)
+    if not np.isfinite(sd) or sd < 1e-12:
+        return np.zeros_like(x)
+    z = (x - mu) / sd
+    z[~np.isfinite(z)] = 0.0
+    return z
+
+
+def _select_pattern_component(df_haufe_t, df_acc_t=None):
+    """Select one Haufe component using hybrid stability + relevance score.
+
+    Score per component: S = z(R) + z(A)
+      R: median split-half reliability of subject maps (averaged across bins)
+      A: significant-bin weighted pattern strength
+    """
     if df_haufe_t is None or df_haufe_t.empty:
         return df_haufe_t
 
     if "pattern_row" not in df_haufe_t.columns:
         return df_haufe_t
 
-    comp_strength = (
-        df_haufe_t.groupby(["pattern_row", "pattern_label"], as_index=False)["pattern_value"]
-        .apply(lambda s: np.mean(np.abs(s)))
-        .rename(columns={"pattern_value": "abs_mean"})
-        .sort_values("abs_mean", ascending=False)
-    )
+    rng = np.random.default_rng(7)
+    bins = np.sort(df_haufe_t["time_bin"].unique())
 
-    best = comp_strength.iloc[0]
+    # Bin weights from decoding significance/effect (same target/model already pre-filtered)
+    bin_weights = {int(b): 0.0 for b in bins}
+    if df_acc_t is not None and (not df_acc_t.empty):
+        for b in bins:
+            d = df_acc_t[df_acc_t["time_bin"] == b]["accuracy"].dropna()
+            if len(d) >= 3:
+                _, p = stats.ttest_1samp(d, CHANCE_LEVEL, alternative="greater")
+                if np.isfinite(p) and p < 0.05:
+                    effect = float(np.mean(d) - CHANCE_LEVEL)
+                    bin_weights[int(b)] = max(0.0, effect)
+
+    rows = []
+    for (row_id, row_label), dcomp in df_haufe_t.groupby(["pattern_row", "pattern_label"], sort=True):
+        # R: reliability across subjects per bin, then averaged across bins
+        rel_bins = []
+        for b in bins:
+            db = dcomp[dcomp["time_bin"] == b]
+            mat = (
+                db.pivot_table(index="subject", columns="channel_idx", values="pattern_value", aggfunc="mean")
+                .sort_index(axis=1)
+                .dropna(axis=0, how="any")
+            )
+            if mat.empty:
+                continue
+            rel_bins.append(_split_half_reliability(mat.to_numpy(dtype=float), rng=rng, n_iter=60))
+
+        R = float(np.nanmean(rel_bins)) if rel_bins else np.nan
+
+        # A: significant-bin weighted mean absolute pattern strength
+        strength_by_bin = (
+            dcomp.groupby("time_bin", as_index=False)["pattern_value"]
+            .apply(lambda s: float(np.mean(np.abs(s))))
+            .rename(columns={"pattern_value": "abs_strength"})
+        )
+        w = []
+        svals = []
+        for _, rr in strength_by_bin.iterrows():
+            b = int(rr["time_bin"])
+            svals.append(float(rr["abs_strength"]))
+            w.append(float(bin_weights.get(b, 0.0)))
+        w = np.asarray(w, dtype=float)
+        svals = np.asarray(svals, dtype=float)
+        if np.sum(w) > 1e-12:
+            A = float(np.sum(w * svals) / np.sum(w))
+        else:
+            A = float(np.mean(svals)) if len(svals) else np.nan
+
+        rows.append(
+            {
+                "pattern_row": row_id,
+                "pattern_label": row_label,
+                "R": R,
+                "A": A,
+            }
+        )
+
+    score_df = pd.DataFrame(rows)
+    if score_df.empty:
+        return df_haufe_t
+
+    # Prefer components with acceptable reliability if available
+    candidates = score_df.copy()
+    reliable = candidates[candidates["R"] >= 0.40]
+    if not reliable.empty:
+        candidates = reliable
+
+    zR = _zscore_series(candidates["R"].to_numpy(dtype=float))
+    zA = _zscore_series(candidates["A"].to_numpy(dtype=float))
+    candidates = candidates.assign(S=zR + zA)
+
+    best = candidates.sort_values(["S", "R", "A"], ascending=False).iloc[0]
     df_sel = df_haufe_t[df_haufe_t["pattern_row"] == best["pattern_row"]]
     return df_sel
 
@@ -393,7 +518,8 @@ def plot_fig2(df, out_dir, model_name, cfg, df_haufe=None):
     if df_haufe is not None:
         for tgt in targets:
             d = df_haufe[df_haufe["target"] == tgt]
-            selected_haufe_by_target[tgt] = _select_pattern_component(d)
+            d_acc = df[df["target"] == tgt]
+            selected_haufe_by_target[tgt] = _select_pattern_component(d, df_acc_t=d_acc)
 
     global_topo_vmax = None
     if selected_haufe_by_target:

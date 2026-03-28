@@ -215,7 +215,10 @@ class Decoder:
             
         if self.models_cfg.get('svm', {}).get('enabled', False):
             m_cfg = self.models_cfg['svm']
-            self.pipelines['svm'] = make_pipeline(StandardScaler(), SVC(C=m_cfg.get('C', 1.0), kernel=m_cfg.get('kernel', 'linear')))
+            svm_kernel = m_cfg.get('kernel', 'linear')
+            self.pipelines['svm'] = make_pipeline(StandardScaler(), SVC(C=m_cfg.get('C', 1.0), kernel=svm_kernel))
+            if svm_kernel != 'linear':
+                print(f"[WARN] SVM kernel='{svm_kernel}' has no coef_; Haufe patterns will not be computed for model 'svm'.")
             self.sliding_window_flags['svm'] = m_cfg.get('use_sliding_window', False)
             
         if self.models_cfg.get('logreg', {}).get('enabled', False):
@@ -271,19 +274,33 @@ class Decoder:
         if coef is None:
             return None, []
 
-        coef = np.atleast_2d(coef)  # (n_rows, n_features)
+        coef = np.atleast_2d(coef).astype(float, copy=False)  # (n_rows, n_features)
 
         # Convert weights from standardized-feature space back to raw-feature space
         if (scaler is not None) and hasattr(scaler, 'scale_'):
-            coef = coef / scaler.scale_[np.newaxis, :]
+            scale = np.asarray(scaler.scale_, dtype=float).copy()
+            scale[scale == 0.0] = 1.0
+            coef = coef / scale[np.newaxis, :]
 
         # Covariance of training data in raw feature space
         Xc = X_train - np.mean(X_train, axis=0, keepdims=True)
-        cov_x = np.cov(Xc, rowvar=False)
-        cov_x = np.atleast_2d(cov_x)
+        if Xc.shape[0] < 2:
+            return None, []
 
-        # Haufe transform: A = Sigma_X * W
-        patterns = (cov_x @ coef.T).T  # (n_rows, n_features)
+        cov_x = np.atleast_2d(np.cov(Xc, rowvar=False)).astype(float, copy=False)
+        cov_x = np.nan_to_num(cov_x, nan=0.0, posinf=0.0, neginf=0.0)
+
+        # Full Haufe transform: A = Sigma_X * W * Sigma_S^{-1}, with S = XW^T
+        # (Haufe et al., 2014). This is exact for multi-output linear decoders.
+        S = Xc @ coef.T  # (n_samples, n_rows)
+        cov_s = np.atleast_2d(np.cov(S, rowvar=False)).astype(float, copy=False)
+        cov_s = np.nan_to_num(cov_s, nan=0.0, posinf=0.0, neginf=0.0)
+
+        eps = 1e-9
+        cov_s_reg = cov_s + eps * np.eye(cov_s.shape[0], dtype=float)
+        cov_s_inv = np.linalg.pinv(cov_s_reg)
+
+        patterns = (cov_x @ coef.T @ cov_s_inv).T  # (n_rows, n_features)
 
         classes = getattr(estimator, 'classes_', None)
         if classes is not None and len(classes) == patterns.shape[0]:
@@ -410,10 +427,10 @@ class Decoder:
         unique, counts = np.unique(y_clean, return_counts=True)
         if len(unique) < 2:
             print(f"      [SKIP] Only 1 class found: {unique}")
-            return None
+            return None, None
         if min(counts) < self.n_avg * 2:
              print(f"      [SKIP] Not enough raw trials for averaging. Counts: {counts}")
-             return None
+             return None, None
 
         all_results = []
         all_patterns = []
