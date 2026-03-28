@@ -1,7 +1,7 @@
 paths:
   bids_root: "/home/miliczpl/MySSD/Code/EEG/data"
-  output_dir: "/home/miliczpl/MySSD/Code/EEG/data/derivatives__ica"
-  report_dir: "/home/miliczpl/MySSD/Code/EEG/data/report__ica"
+  output_dir: "/home/miliczpl/MySSD/Code/EEG/data/derivatives__notch50+100_ica"
+  report_dir: "/home/miliczpl/MySSD/Code/EEG/data/report__notch50+100_ica"
 
 subjects:
   include: [1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34]
@@ -17,7 +17,7 @@ params:
   #   notch_freqs: [50, 100]
   highpass_hz: null
   lowpass_hz: null
-  notch_freqs: []
+  notch_freqs: [50, 100]
   notch_widths: null
 
   # Optional PSD QC figure saved on final cleaned epochs (post-interp, pre-resample)

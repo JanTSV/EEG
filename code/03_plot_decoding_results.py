@@ -16,9 +16,9 @@ CHANCE_LEVEL = 33.33
 # Defined Phases with distinct pastel colors for separation
 # Format: (StartBin, EndBin, Label, Color)
 PHASES = [
-    (0, 7.5, "Decision", "#fff3e0"),  # Light Orange
-    (7.5, 15.5, "Response", "#e3f2fd"),  # Light Blue
-    (15.5, 19.5, "Feedback", "#f3e5f5"),  # Light Purple
+    (0, 8.0, "Decision", "#fff3e0"),  # Light Orange
+    (8.0, 16.0, "Response", "#e3f2fd"),  # Light Blue
+    (16.0, 20.0, "Feedback", "#f3e5f5"),  # Light Purple
 ]
 
 COLORS = {
@@ -106,10 +106,10 @@ def aggregate_haufe_data(results_dir):
 def _select_pattern_component(df_haufe_t):
     """Select one stable Haufe component for plotting (avoid mixing multiclass rows)."""
     if df_haufe_t is None or df_haufe_t.empty:
-        return df_haufe_t, None
+        return df_haufe_t
 
     if "pattern_row" not in df_haufe_t.columns:
-        return df_haufe_t, "component_0"
+        return df_haufe_t
 
     comp_strength = (
         df_haufe_t.groupby(["pattern_row", "pattern_label"], as_index=False)["pattern_value"]
@@ -120,7 +120,7 @@ def _select_pattern_component(df_haufe_t):
 
     best = comp_strength.iloc[0]
     df_sel = df_haufe_t[df_haufe_t["pattern_row"] == best["pattern_row"]]
-    return df_sel, str(best["pattern_label"])
+    return df_sel
 
 
 def get_p_values(df, target, bins, mode="one_sample"):
@@ -137,7 +137,7 @@ def get_p_values(df, target, bins, mode="one_sample"):
     return p_vals
 
 
-def plot_heatmap(ax, p_vals, n_bins):
+def plot_heatmap(ax, p_vals, n_bins, bin_width_s=0.25):
     """Plots the significance strip."""
     map_vals = np.zeros((1, n_bins))
     for i, p in enumerate(p_vals):
@@ -155,25 +155,28 @@ def plot_heatmap(ax, p_vals, n_bins):
     bounds = [-0.5, 0.5, 1.5, 2.5, 3.5]
     norm = mcolors.BoundaryNorm(bounds, cmap.N)
 
-    ax.imshow(map_vals, aspect="auto", cmap=cmap, norm=norm, extent=[-0.5, 19.5, 0, 1])
+    t_max = n_bins * float(bin_width_s)
+    ax.imshow(map_vals, aspect="auto", cmap=cmap, norm=norm, extent=[0.0, t_max, 0, 1])
     ax.set_yticks([])
-    ax.set_xlim(-0.5, 19.5)
+    ax.set_xlim(0.0, t_max)
 
     # Add vertical phase dividers
     for _, end, _, _ in PHASES:
-        ax.axvline(end, color="white", linewidth=2)
+        ax.axvline(end * float(bin_width_s), color="white", linewidth=2)
 
 
-def style_phase_background(ax):
+def style_phase_background(ax, x_scale=1.0):
     """Applies colored phase backgrounds and labels."""
     for start, end, label, color in PHASES:
-        ax.axvspan(start, end, color=color, alpha=0.6, lw=0, zorder=0)
+        start_x = start * x_scale
+        end_x = end * x_scale
+        ax.axvspan(start_x, end_x, color=color, alpha=0.6, lw=0, zorder=0)
         # Vertical divider line
-        ax.axvline(end, color="white", linewidth=2, zorder=1)
+        ax.axvline(end_x, color="white", linewidth=2, zorder=1)
         # Label (only if it's a main plot)
         if ax.get_ylabel():
             ax.text(
-                (start + end) / 2,
+                (start_x + end_x) / 2,
                 ax.get_ylim()[1] * 0.98,
                 label,
                 ha="center",
@@ -184,8 +187,8 @@ def style_phase_background(ax):
             )
 
 
-def _plot_haufe_topomap_row(subspec, df_haufe_t, n_bins, bin_width_s, component_label=None):
-    """Plot one topomap per 4 bins (1 second per topomap) with shared time axis."""
+def _plot_haufe_topomap_row(subspec, df_haufe_t, n_bins, bin_width_s=0.25, show_time_axis=False):
+    """Plot one topomap per 4 bins (1 second per topomap)."""
     if df_haufe_t is None or df_haufe_t.empty:
         ax_empty = plt.subplot(subspec)
         ax_empty.axis("off")
@@ -230,27 +233,36 @@ def _plot_haufe_topomap_row(subspec, df_haufe_t, n_bins, bin_width_s, component_
     vmax = max(np.max(np.abs(v)) for v in maps) if maps else 1.0
     vmax = max(vmax, 1e-12)
 
-    inner = GridSpecFromSubplotSpec(2, n_groups, subplot_spec=subspec, height_ratios=[8, 1.2], hspace=0.15, wspace=0.25)
+    if show_time_axis:
+        inner = GridSpecFromSubplotSpec(
+            2,
+            n_groups,
+            subplot_spec=subspec,
+            height_ratios=[8, 1.2],
+            hspace=0.1,
+            wspace=0.25,
+        )
+    else:
+        inner = GridSpecFromSubplotSpec(1, n_groups, subplot_spec=subspec, hspace=0.0, wspace=0.25)
 
     for i, ((start_bin, end_bin), vec) in enumerate(zip(bin_groups, maps)):
         ax_map = plt.subplot(inner[0, i])
         mne.viz.plot_topomap(vec, info, axes=ax_map, show=False, cmap="RdBu_r", vlim=(-vmax, vmax), contours=0)
-        t_start = start_bin * bin_width_s
-        t_end = (end_bin + 1) * bin_width_s
-        ax_map.set_title(f"{t_start:.1f}-{t_end:.1f}s", fontsize=8)
 
-    ax_time = plt.subplot(inner[1, :])
-    ax_time.set_xlim(0, float(n_groups))
-    ax_time.set_ylim(0, 1)
-    ax_time.set_yticks([])
-    ax_time.set_xticks(np.arange(0, n_groups + 1, 1))
-    ax_time.set_xlabel("Time (s)")
-    for spine in ["left", "right", "top"]:
-        ax_time.spines[spine].set_visible(False)
-    for x in np.arange(0, n_groups + 1, 1):
-        ax_time.axvline(x, color="#cccccc", linewidth=0.6, alpha=0.6)
-    if component_label:
-        ax_time.set_title(f"Haufe component: {component_label}", fontsize=8, pad=2)
+    if show_time_axis:
+        ax_time = plt.subplot(inner[1, :])
+        ax_time.set_xlim(0, float(n_groups))
+        ax_time.set_ylim(0, 1)
+        ax_time.set_yticks([])
+        ax_time.set_xticks(np.arange(0, n_groups + 1, 1))
+        group_duration_s = 4 * float(bin_width_s)
+        tick_labels = [f"{x * group_duration_s:.0f}" for x in np.arange(0, n_groups + 1, 1)]
+        ax_time.set_xticklabels(tick_labels)
+        ax_time.set_xlabel("Time (s)")
+        for spine in ["left", "right", "top"]:
+            ax_time.spines[spine].set_visible(False)
+        for x in np.arange(0, n_groups + 1, 1):
+            ax_time.axvline(x, color="#cccccc", linewidth=0.6, alpha=0.6)
 
 
 def plot_fig2(df, out_dir, model_name, cfg, df_haufe=None):
@@ -261,29 +273,41 @@ def plot_fig2(df, out_dir, model_name, cfg, df_haufe=None):
     bin_width_s = cfg['params'].get('bin_width', 0.25)
     
     targets = [t for t in PLOT_TARGETS if t in df["target"].unique()]
-    fig = plt.figure(figsize=(9, 3.5 * len(targets)))
-    gs = gridspec.GridSpec(
-        len(targets) * 3, 1, height_ratios=[3, 0.25, 2.1] * len(targets), hspace=0.4
-    )
+    n_cols = 2 if len(targets) > 1 else 1
+    n_rows = int(np.ceil(len(targets) / n_cols))
+
+    fig = plt.figure(figsize=(12.5, 3.9 * n_rows))
+    outer = gridspec.GridSpec(n_rows, n_cols, hspace=0.18, wspace=0.2)
 
     bins = np.sort(df["time_bin"].unique())
+    t_max = len(bins) * bin_width_s
 
     for i, tgt in enumerate(targets):
-        base = 3 * i
+        row = i // n_cols
+        col = i % n_cols
+        panel = GridSpecFromSubplotSpec(
+            3,
+            1,
+            subplot_spec=outer[row, col],
+            height_ratios=[3, 0.25, 2.1],
+            hspace=0.14,
+        )
         df_t = df[df["target"] == tgt]
 
         # Main
-        ax = plt.subplot(gs[base])
+        ax = plt.subplot(panel[0])
         ax.set_ylim(y_min, y_max)  # Set limits BEFORE styling to place text correctly
         ax.set_ylabel("Accuracy (%)")
-        style_phase_background(ax)
+        style_phase_background(ax, x_scale=bin_width_s)
 
         ax.axhline(
             CHANCE_LEVEL, color=COLORS["chance"], linestyle="--", lw=1.5, zorder=2
         )
+        df_t_plot = df_t.copy()
+        df_t_plot["time_s"] = (df_t_plot["time_bin"] + 0.5) * bin_width_s
         sns.lineplot(
-            data=df_t,
-            x="time_bin",
+            data=df_t_plot,
+            x="time_s",
             y="accuracy",
             ax=ax,
             color=COLORS["main"],
@@ -300,31 +324,36 @@ def plot_fig2(df, out_dir, model_name, cfg, df_haufe=None):
             fontweight="bold",
             pad=10,
         )
-        ax.set_xlim(-0.5, 19.5)
+        ax.set_xlim(0.0, t_max)
+        ax.set_xlabel("")
         ax.set_xticklabels([])
 
         # Strip
-        ax_s = plt.subplot(gs[base + 1])
-        plot_heatmap(ax_s, get_p_values(df_t, tgt, bins), len(bins))
-        if i == len(targets) - 1:
-            ax_s.set_xlabel("Time Bins")
-        else:
-            ax_s.set_xticks([])
+        ax_s = plt.subplot(panel[1])
+        plot_heatmap(ax_s, get_p_values(df_t, tgt, bins), len(bins), bin_width_s=bin_width_s)
+        ax_s.set_xticks([])
 
         # Haufe topoplots (1 map per 4 bins = 1 second)
-        ax_topo_spec = gs[base + 2]
+        ax_topo_spec = panel[2]
         df_haufe_t = None
-        component_label = None
         if df_haufe is not None:
             df_haufe_t = df_haufe[df_haufe["target"] == tgt]
-            df_haufe_t, component_label = _select_pattern_component(df_haufe_t)
+            df_haufe_t = _select_pattern_component(df_haufe_t)
         _plot_haufe_topomap_row(
             ax_topo_spec,
             df_haufe_t,
             n_bins=len(bins),
             bin_width_s=bin_width_s,
-            component_label=component_label,
+            show_time_axis=(row == n_rows - 1),
         )
+
+    # Hide any unused grid cell(s)
+    total_cells = n_rows * n_cols
+    for j in range(len(targets), total_cells):
+        row = j // n_cols
+        col = j % n_cols
+        ax_unused = plt.subplot(outer[row, col])
+        ax_unused.axis("off")
 
     plt.tight_layout()
     plt.savefig(out_dir / f"Figure2_GrandAverage_Polished_{model_name}.png", dpi=300)
@@ -336,32 +365,46 @@ def plot_fig3(df, out_dir, model_name, cfg):
     
     y_min = cfg['plotting'].get('y_min', 25)
     y_max = cfg['plotting'].get('y_max', 45)
+    bin_width_s = cfg['params'].get('bin_width', 0.25)
     
     if len(df["player_status"].unique()) < 2:
         return
     targets = [t for t in PLOT_TARGETS if t in df["target"].unique()]
 
-    fig = plt.figure(figsize=(9, 5 * len(targets)))
-    # Ratios: Plot(3), StripW(0.2), StripL(0.2), StripDiff(0.2)
-    gs = gridspec.GridSpec(
-        len(targets) * 4, 1, height_ratios=[3, 0.2, 0.2, 0.2] * len(targets), hspace=0.4
-    )
+    n_cols = 2 if len(targets) > 1 else 1
+    n_rows = int(np.ceil(len(targets) / n_cols))
+
+    fig = plt.figure(figsize=(12.5, 4.0 * n_rows))
+    outer = gridspec.GridSpec(n_rows, n_cols, hspace=0.2, wspace=0.2)
+
     bins = np.sort(df["time_bin"].unique())
+    t_max = len(bins) * bin_width_s
 
     for i, tgt in enumerate(targets):
         df_t = df[df["target"] == tgt]
-        base = 4 * i
+        row = i // n_cols
+        col = i % n_cols
+        panel = GridSpecFromSubplotSpec(
+            4,
+            1,
+            subplot_spec=outer[row, col],
+            height_ratios=[3, 0.2, 0.2, 0.2],
+            hspace=0.12,
+        )
 
         # Main
-        ax = plt.subplot(gs[base])
+        ax = plt.subplot(panel[0])
         ax.set_ylim(y_min, y_max)
         ax.set_ylabel("Accuracy (%)")
-        style_phase_background(ax)
+        style_phase_background(ax, x_scale=bin_width_s)
         ax.axhline(CHANCE_LEVEL, color=COLORS["chance"], linestyle="--", zorder=2)
 
+        df_t_plot = df_t.copy()
+        df_t_plot["time_s"] = (df_t_plot["time_bin"] + 0.5) * bin_width_s
+
         sns.lineplot(
-            data=df_t[df_t["player_status"] == "Winner"],
-            x="time_bin",
+            data=df_t_plot[df_t_plot["player_status"] == "Winner"],
+            x="time_s",
             y="accuracy",
             ax=ax,
             color=COLORS["winner"],
@@ -372,8 +415,8 @@ def plot_fig3(df, out_dir, model_name, cfg):
             zorder=3,
         )
         sns.lineplot(
-            data=df_t[df_t["player_status"] == "Loser"],
-            x="time_bin",
+            data=df_t_plot[df_t_plot["player_status"] == "Loser"],
+            x="time_s",
             y="accuracy",
             ax=ax,
             color=COLORS["loser"],
@@ -387,29 +430,35 @@ def plot_fig3(df, out_dir, model_name, cfg):
         ax.set_title(
             f"{chr(65 + i)}) {tgt.replace('_', ' ')}", loc="left", fontweight="bold"
         )
-        ax.set_xlim(-0.5, 19.5)
+        ax.set_xlim(0.0, t_max)
+        ax.set_xlabel("")
         ax.set_xticklabels([])
         ax.legend(loc="upper right", fontsize=9, framealpha=0.9)
 
         # Strips
         for j, (mode, label) in enumerate([("Winner", "Win"), ("Loser", "Lose")]):
-            ax_s = plt.subplot(gs[base + 1 + j])
+            ax_s = plt.subplot(panel[1 + j])
             p = get_p_values(
                 df_t[df_t["player_status"] == mode], tgt, bins, "one_sample"
             )
-            plot_heatmap(ax_s, p, len(bins))
+            plot_heatmap(ax_s, p, len(bins), bin_width_s=bin_width_s)
             ax_s.set_ylabel(label, rotation=0, ha="right", va="center", fontsize=8)
             ax_s.set_xticks([])
 
         # Diff Strip
-        ax_d = plt.subplot(gs[base + 3])
+        ax_d = plt.subplot(panel[3])
         p = get_p_values(df_t, tgt, bins, "two_sample")
-        plot_heatmap(ax_d, p, len(bins))
+        plot_heatmap(ax_d, p, len(bins), bin_width_s=bin_width_s)
         ax_d.set_ylabel("Diff", rotation=0, ha="right", va="center", fontsize=8)
-        if i == len(targets) - 1:
-            ax_d.set_xlabel("Time Bins")
-        else:
-            ax_d.set_xticks([])
+        ax_d.set_xticks([])
+
+    # Hide any unused grid cell(s)
+    total_cells = n_rows * n_cols
+    for j in range(len(targets), total_cells):
+        row = j // n_cols
+        col = j % n_cols
+        ax_unused = plt.subplot(outer[row, col])
+        ax_unused.axis("off")
 
     plt.tight_layout()
     plt.savefig(out_dir / f"Figure3_WinnerLoser_Polished_{model_name}.png", dpi=300)
@@ -421,23 +470,33 @@ def plot_model_comparison(df, out_dir, cfg):
     
     y_min = cfg['plotting'].get('y_min', 25)
     y_max = cfg['plotting'].get('y_max', 45)
+    bin_width_s = cfg['params'].get('bin_width', 0.25)
     
     targets = [t for t in PLOT_TARGETS if t in df["target"].unique()]
-    fig = plt.figure(figsize=(9, 3.5 * len(targets)))
-    gs = gridspec.GridSpec(len(targets), 1, hspace=0.35)
+    bins = np.sort(df["time_bin"].unique())
+    t_max = len(bins) * bin_width_s
+    n_cols = 2 if len(targets) > 1 else 1
+    n_rows = int(np.ceil(len(targets) / n_cols))
+    fig = plt.figure(figsize=(12.5, 3.0 * n_rows))
+    gs = gridspec.GridSpec(n_rows, n_cols, hspace=0.2, wspace=0.2)
 
     for i, tgt in enumerate(targets):
         df_t = df[df["target"] == tgt]
+        row = i // n_cols
+        col = i % n_cols
         
-        ax = plt.subplot(gs[i])
+        ax = plt.subplot(gs[row, col])
         ax.set_ylim(y_min, y_max)
         ax.set_ylabel("Accuracy (%)")
-        style_phase_background(ax)
+        style_phase_background(ax, x_scale=bin_width_s)
         ax.axhline(CHANCE_LEVEL, color=COLORS["chance"], linestyle="--", lw=1.5, zorder=2)
+
+        df_t_plot = df_t.copy()
+        df_t_plot["time_s"] = (df_t_plot["time_bin"] + 0.5) * bin_width_s
         
         sns.lineplot(
-            data=df_t,
-            x="time_bin",
+            data=df_t_plot,
+            x="time_s",
             y="accuracy",
             hue="model",
             ax=ax,
@@ -449,14 +508,25 @@ def plot_model_comparison(df, out_dir, cfg):
         )
         
         ax.set_title(f"{chr(65 + i)}) {tgt.replace('_', ' ')}", loc="left", fontweight="bold", pad=10)
-        ax.set_xlim(-0.5, 19.5)
-        if i == len(targets) - 1:
-            ax.set_xlabel("Time Bins")
+        ax.set_xlim(0.0, t_max)
+        if row == n_rows - 1:
+            tick_pos = np.arange(0, t_max + 1e-9, 1.0)
+            ax.set_xticks(tick_pos)
+            ax.set_xticklabels([f"{p:.0f}" for p in tick_pos])
+            ax.set_xlabel("Time (s)")
         else:
             ax.set_xlabel("")
             ax.set_xticklabels([])
             
         ax.legend(loc="upper right", fontsize=9, framealpha=0.9, title="Model")
+
+    # Hide any unused grid cell(s)
+    total_cells = n_rows * n_cols
+    for j in range(len(targets), total_cells):
+        row = j // n_cols
+        col = j % n_cols
+        ax_unused = plt.subplot(gs[row, col])
+        ax_unused.axis("off")
 
     plt.tight_layout()
     plt.savefig(out_dir / "Figure_Model_Comparison.png", dpi=300)
