@@ -6,6 +6,8 @@ import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
 from matplotlib.gridspec import GridSpecFromSubplotSpec
 import matplotlib.colors as mcolors
+from matplotlib.lines import Line2D
+from matplotlib.patches import Patch
 import seaborn as sns
 from scipy import stats
 from pathlib import Path
@@ -34,7 +36,66 @@ COLORS = {
     ],  # White -> Yellow -> Orange -> Red
 }
 
-PLOT_TARGETS = ["Self_Response", "Other_Response", "Outcome", "Prev_Self_Response"]
+PLOT_TARGETS = ["Self_Response", "Other_Response", "Prev_Self_Response", "Prev_Other_Response"]
+TOPO_SCALE_PERCENTILE = 90.0
+
+
+def _compute_y_ticks(y_min, y_max, step=5):
+    lo = int(np.floor(y_min / step) * step)
+    hi = int(np.ceil(y_max / step) * step)
+    return np.arange(lo, hi + step, step)
+
+
+def _style_accuracy_axis(ax, y_min, y_max):
+    ax.set_ylim(y_min, y_max)
+    ax.set_yticks(np.arange(32, 40.1, 2))
+    ax.grid(axis="y", color="#cfcfcf", linewidth=0.6, alpha=0.45)
+    ax.grid(axis="x", visible=False)
+
+
+def _strip_legend_handles():
+    return [
+        Patch(facecolor=COLORS["heatmap"][0], edgecolor="#999", label="ns"),
+        Patch(facecolor=COLORS["heatmap"][1], edgecolor="#999", label="p < .05"),
+        Patch(facecolor=COLORS["heatmap"][2], edgecolor="#999", label="p < .01"),
+        Patch(facecolor=COLORS["heatmap"][3], edgecolor="#999", label="p < .001"),
+    ]
+
+
+def _add_split_legends(fig, accuracy_handles, significance_handles, y=1.01):
+    """Add two separate figure legends for better readability."""
+    leg_acc = fig.legend(
+        handles=accuracy_handles,
+        title="Accuracy",
+        loc="upper left",
+        bbox_to_anchor=(0.02, y),
+        ncol=len(accuracy_handles),
+        frameon=False,
+        fontsize=8,
+        title_fontsize=8,
+        handlelength=2.2,
+        columnspacing=1.2,
+    )
+    fig.add_artist(leg_acc)
+
+    fig.legend(
+        handles=significance_handles,
+        title="Significance strip",
+        loc="upper right",
+        bbox_to_anchor=(0.98, y),
+        ncol=len(significance_handles),
+        frameon=False,
+        fontsize=8,
+        title_fontsize=8,
+        handlelength=1.6,
+        columnspacing=0.9,
+    )
+
+
+def _save_figure_all_formats(fig, out_file_png):
+    fig.savefig(out_file_png, dpi=300)
+    fig.savefig(out_file_png.with_suffix(".pdf"))
+    fig.savefig(out_file_png.with_suffix(".svg"))
 
 
 def load_config():
@@ -181,13 +242,21 @@ def style_phase_background(ax, x_scale=1.0):
                 label,
                 ha="center",
                 va="top",
-                fontsize=9,
-                fontweight="bold",
-                color="#666",
+                fontsize=8,
+                fontweight="semibold",
+                color="#777",
             )
 
 
-def _plot_haufe_topomap_row(subspec, df_haufe_t, n_bins, bin_width_s=0.25, show_time_axis=False):
+def _plot_haufe_topomap_row(
+    subspec,
+    df_haufe_t,
+    n_bins,
+    bin_width_s=0.25,
+    show_time_axis=False,
+    show_colorbar=True,
+    fixed_vmax=None,
+):
     """Plot one topomap per 4 bins (1 second per topomap)."""
     if df_haufe_t is None or df_haufe_t.empty:
         ax_empty = plt.subplot(subspec)
@@ -231,23 +300,61 @@ def _plot_haufe_topomap_row(subspec, df_haufe_t, n_bins, bin_width_s=0.25, show_
         maps.append(vec)
 
     vmax = max(np.max(np.abs(v)) for v in maps) if maps else 1.0
+    if fixed_vmax is not None:
+        vmax = float(fixed_vmax)
     vmax = max(vmax, 1e-12)
+
+    n_cols_inner = n_groups
+    width_ratios = [1] * n_groups
 
     if show_time_axis:
         inner = GridSpecFromSubplotSpec(
             2,
-            n_groups,
+            n_cols_inner,
             subplot_spec=subspec,
+            width_ratios=width_ratios,
             height_ratios=[8, 1.2],
             hspace=0.1,
             wspace=0.25,
         )
     else:
-        inner = GridSpecFromSubplotSpec(1, n_groups, subplot_spec=subspec, hspace=0.0, wspace=0.25)
+        inner = GridSpecFromSubplotSpec(
+            1,
+            n_cols_inner,
+            subplot_spec=subspec,
+            width_ratios=width_ratios,
+            hspace=0.0,
+            wspace=0.25,
+        )
 
+    first_im = None
+    last_map_ax = None
     for i, ((start_bin, end_bin), vec) in enumerate(zip(bin_groups, maps)):
-        ax_map = plt.subplot(inner[0, i])
-        mne.viz.plot_topomap(vec, info, axes=ax_map, show=False, cmap="RdBu_r", vlim=(-vmax, vmax), contours=0)
+        col_i = i
+        ax_map = plt.subplot(inner[0, col_i])
+        im, _ = mne.viz.plot_topomap(
+            vec,
+            info,
+            axes=ax_map,
+            show=False,
+            cmap="RdBu_r",
+            vlim=(-vmax, vmax),
+            contours=0,
+        )
+        if first_im is None:
+            first_im = im
+        last_map_ax = ax_map
+
+    if show_colorbar and first_im is not None and last_map_ax is not None:
+        fig = plt.gcf()
+        pos = last_map_ax.get_position()
+        cbar_w = 0.008
+        cbar_pad = 0.004
+        cbar_x = min(pos.x1 + cbar_pad, 0.992 - cbar_w)
+        cax = fig.add_axes([cbar_x, pos.y0, cbar_w, pos.height])
+        cb = fig.colorbar(first_im, cax=cax, orientation="vertical")
+        cb.ax.tick_params(labelsize=7, length=2)
+        cb.set_label("Pattern", fontsize=7)
 
     if show_time_axis:
         ax_time = plt.subplot(inner[1, :])
@@ -268,8 +375,8 @@ def _plot_haufe_topomap_row(subspec, df_haufe_t, n_bins, bin_width_s=0.25, show_
 def plot_fig2(df, out_dir, model_name, cfg, df_haufe=None):
     print(f"Plotting Figure 2 (Polished) for {model_name}...")
     
-    y_min = cfg['plotting'].get('y_min', 25)
-    y_max = cfg['plotting'].get('y_max', 45)
+    y_min = 31
+    y_max = 40
     bin_width_s = cfg['params'].get('bin_width', 0.25)
     
     targets = [t for t in PLOT_TARGETS if t in df["target"].unique()]
@@ -281,6 +388,24 @@ def plot_fig2(df, out_dir, model_name, cfg, df_haufe=None):
 
     bins = np.sort(df["time_bin"].unique())
     t_max = len(bins) * bin_width_s
+
+    selected_haufe_by_target = {}
+    if df_haufe is not None:
+        for tgt in targets:
+            d = df_haufe[df_haufe["target"] == tgt]
+            selected_haufe_by_target[tgt] = _select_pattern_component(d)
+
+    global_topo_vmax = None
+    if selected_haufe_by_target:
+        vals = [
+            np.abs(d["pattern_value"].values)
+            for d in selected_haufe_by_target.values()
+            if d is not None and not d.empty
+        ]
+        if vals:
+            abs_all = np.concatenate(vals)
+            # Robust shared scaling across all targets: avoid outlier-driven colorbar inflation
+            global_topo_vmax = float(np.percentile(abs_all, TOPO_SCALE_PERCENTILE))
 
     for i, tgt in enumerate(targets):
         row = i // n_cols
@@ -296,7 +421,7 @@ def plot_fig2(df, out_dir, model_name, cfg, df_haufe=None):
 
         # Main
         ax = plt.subplot(panel[0])
-        ax.set_ylim(y_min, y_max)  # Set limits BEFORE styling to place text correctly
+        _style_accuracy_axis(ax, y_min, y_max)  # Set limits BEFORE styling to place text correctly
         ax.set_ylabel("Accuracy (%)")
         style_phase_background(ax, x_scale=bin_width_s)
 
@@ -335,17 +460,18 @@ def plot_fig2(df, out_dir, model_name, cfg, df_haufe=None):
 
         # Haufe topoplots (1 map per 4 bins = 1 second)
         ax_topo_spec = panel[2]
-        df_haufe_t = None
-        if df_haufe is not None:
-            df_haufe_t = df_haufe[df_haufe["target"] == tgt]
-            df_haufe_t = _select_pattern_component(df_haufe_t)
+        df_haufe_t = selected_haufe_by_target.get(tgt, None)
         _plot_haufe_topomap_row(
             ax_topo_spec,
             df_haufe_t,
             n_bins=len(bins),
             bin_width_s=bin_width_s,
             show_time_axis=(row == n_rows - 1),
+            show_colorbar=(col == n_cols - 1),
+            fixed_vmax=global_topo_vmax,
         )
+
+    fig.text(0.012, 0.22, "Haufe patterns", rotation=90, ha="center", va="center", fontsize=8, color="#666")
 
     # Hide any unused grid cell(s)
     total_cells = n_rows * n_cols
@@ -355,16 +481,23 @@ def plot_fig2(df, out_dir, model_name, cfg, df_haufe=None):
         ax_unused = plt.subplot(outer[row, col])
         ax_unused.axis("off")
 
-    plt.tight_layout()
-    plt.savefig(out_dir / f"Figure2_GrandAverage_Polished_{model_name}.png", dpi=300)
+    acc_handles = [
+        Line2D([0], [0], color=COLORS["main"], marker="o", linewidth=2, label="Mean accuracy"),
+        Line2D([0], [0], color=COLORS["chance"], linestyle="--", linewidth=1.5, label="Chance"),
+    ]
+    sig_handles = _strip_legend_handles()
+    _add_split_legends(fig, acc_handles, sig_handles, y=1.01)
+
+    plt.tight_layout(rect=[0, 0, 1, 0.95])
+    _save_figure_all_formats(fig, out_dir / f"Figure2_GrandAverage_Polished_{model_name}.png")
     plt.close()
 
 
 def plot_fig3(df, out_dir, model_name, cfg):
     print(f"Plotting Figure 3 (Polished Split) for {model_name}...")
     
-    y_min = cfg['plotting'].get('y_min', 25)
-    y_max = cfg['plotting'].get('y_max', 45)
+    y_min = 31
+    y_max = 40
     bin_width_s = cfg['params'].get('bin_width', 0.25)
     
     if len(df["player_status"].unique()) < 2:
@@ -394,7 +527,7 @@ def plot_fig3(df, out_dir, model_name, cfg):
 
         # Main
         ax = plt.subplot(panel[0])
-        ax.set_ylim(y_min, y_max)
+        _style_accuracy_axis(ax, y_min, y_max)
         ax.set_ylabel("Accuracy (%)")
         style_phase_background(ax, x_scale=bin_width_s)
         ax.axhline(CHANCE_LEVEL, color=COLORS["chance"], linestyle="--", zorder=2)
@@ -433,7 +566,8 @@ def plot_fig3(df, out_dir, model_name, cfg):
         ax.set_xlim(0.0, t_max)
         ax.set_xlabel("")
         ax.set_xticklabels([])
-        ax.legend(loc="upper right", fontsize=9, framealpha=0.9)
+        if ax.get_legend() is not None:
+            ax.get_legend().remove()
 
         # Strips
         for j, (mode, label) in enumerate([("Winner", "Win"), ("Loser", "Lose")]):
@@ -460,20 +594,30 @@ def plot_fig3(df, out_dir, model_name, cfg):
         ax_unused = plt.subplot(outer[row, col])
         ax_unused.axis("off")
 
-    plt.tight_layout()
-    plt.savefig(out_dir / f"Figure3_WinnerLoser_Polished_{model_name}.png", dpi=300)
+    acc_handles = [
+        Line2D([0], [0], color=COLORS["winner"], marker="o", linewidth=2, label="Winner"),
+        Line2D([0], [0], color=COLORS["loser"], marker="o", linewidth=2, label="Loser"),
+        Line2D([0], [0], color=COLORS["chance"], linestyle="--", linewidth=1.5, label="Chance"),
+    ]
+    sig_handles = _strip_legend_handles()
+    _add_split_legends(fig, acc_handles, sig_handles, y=1.01)
+
+    plt.tight_layout(rect=[0, 0, 1, 0.95])
+    _save_figure_all_formats(fig, out_dir / f"Figure3_WinnerLoser_Polished_{model_name}.png")
     plt.close()
 
 
 def plot_model_comparison(df, out_dir, cfg):
     print("Plotting Model Comparison...")
     
-    y_min = cfg['plotting'].get('y_min', 25)
-    y_max = cfg['plotting'].get('y_max', 45)
+    y_min = 31
+    y_max = 40
     bin_width_s = cfg['params'].get('bin_width', 0.25)
     
     targets = [t for t in PLOT_TARGETS if t in df["target"].unique()]
     bins = np.sort(df["time_bin"].unique())
+    model_order = sorted(df["model"].unique())
+    model_palette = dict(zip(model_order, sns.color_palette(n_colors=len(model_order))))
     t_max = len(bins) * bin_width_s
     n_cols = 2 if len(targets) > 1 else 1
     n_rows = int(np.ceil(len(targets) / n_cols))
@@ -486,7 +630,7 @@ def plot_model_comparison(df, out_dir, cfg):
         col = i % n_cols
         
         ax = plt.subplot(gs[row, col])
-        ax.set_ylim(y_min, y_max)
+        _style_accuracy_axis(ax, y_min, y_max)
         ax.set_ylabel("Accuracy (%)")
         style_phase_background(ax, x_scale=bin_width_s)
         ax.axhline(CHANCE_LEVEL, color=COLORS["chance"], linestyle="--", lw=1.5, zorder=2)
@@ -499,6 +643,8 @@ def plot_model_comparison(df, out_dir, cfg):
             x="time_s",
             y="accuracy",
             hue="model",
+            hue_order=model_order,
+            palette=model_palette,
             ax=ax,
             linewidth=2.5,
             marker="o",
@@ -518,7 +664,8 @@ def plot_model_comparison(df, out_dir, cfg):
             ax.set_xlabel("")
             ax.set_xticklabels([])
             
-        ax.legend(loc="upper right", fontsize=9, framealpha=0.9, title="Model")
+        if ax.get_legend() is not None:
+            ax.get_legend().remove()
 
     # Hide any unused grid cell(s)
     total_cells = n_rows * n_cols
@@ -528,8 +675,18 @@ def plot_model_comparison(df, out_dir, cfg):
         ax_unused = plt.subplot(gs[row, col])
         ax_unused.axis("off")
 
-    plt.tight_layout()
-    plt.savefig(out_dir / "Figure_Model_Comparison.png", dpi=300)
+    model_handles = [
+        Line2D([0], [0], color=model_palette[m], marker="o", linewidth=2, label=m)
+        for m in model_order
+    ]
+    handles = [
+        *model_handles,
+        Line2D([0], [0], color=COLORS["chance"], linestyle="--", linewidth=1.5, label="Chance"),
+    ]
+    fig.legend(handles=handles, loc="upper center", ncol=min(6, len(handles)), frameon=False, bbox_to_anchor=(0.5, 1.01), fontsize=8)
+
+    plt.tight_layout(rect=[0, 0, 1, 0.98])
+    _save_figure_all_formats(fig, out_dir / "Figure_Model_Comparison.png")
     plt.close()
 
 
