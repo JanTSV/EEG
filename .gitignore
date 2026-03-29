@@ -4,6 +4,10 @@ data/sub-31
 data/derivatives
 data/
 
+
+#backup results
+results_EEG_backup/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]

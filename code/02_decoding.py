@@ -15,7 +15,6 @@ from sklearn.metrics import accuracy_score
 from sklearn.base import BaseEstimator, ClassifierMixin
 from sklearn.base import clone
 from joblib import Parallel, delayed
-from mne.decoding import SlidingEstimator
 
 # PyTorch Imports
 import torch
@@ -207,11 +206,9 @@ class Decoder:
         self.models_cfg = config.get('models', {'lda': {'enabled': True}})
         
         self.pipelines = {}
-        self.sliding_window_flags = {}
         
         if self.models_cfg.get('lda', {}).get('enabled', False):
             self.pipelines['lda'] = make_pipeline(StandardScaler(), LinearDiscriminantAnalysis(solver='lsqr', shrinkage='auto'))
-            self.sliding_window_flags['lda'] = self.models_cfg.get('lda', {}).get('use_sliding_window', False)
             
         if self.models_cfg.get('svm', {}).get('enabled', False):
             m_cfg = self.models_cfg['svm']
@@ -219,17 +216,14 @@ class Decoder:
             self.pipelines['svm'] = make_pipeline(StandardScaler(), SVC(C=m_cfg.get('C', 1.0), kernel=svm_kernel))
             if svm_kernel != 'linear':
                 print(f"[WARN] SVM kernel='{svm_kernel}' has no coef_; Haufe patterns will not be computed for model 'svm'.")
-            self.sliding_window_flags['svm'] = m_cfg.get('use_sliding_window', False)
             
         if self.models_cfg.get('logreg', {}).get('enabled', False):
             m_cfg = self.models_cfg['logreg']
             self.pipelines['logreg'] = make_pipeline(StandardScaler(), LogisticRegression(C=m_cfg.get('C', 1.0), solver='lbfgs', max_iter=1000))
-            self.sliding_window_flags['logreg'] = m_cfg.get('use_sliding_window', False)
 
         if self.models_cfg.get('ridge', {}).get('enabled', False):
             m_cfg = self.models_cfg['ridge']
             self.pipelines['ridge'] = make_pipeline(StandardScaler(), RidgeClassifier(alpha=m_cfg.get('alpha', 1.0)))
-            self.sliding_window_flags['ridge'] = m_cfg.get('use_sliding_window', False)
 
         if self.models_cfg.get('torch_mlp', {}).get('enabled', False):
             m_cfg = self.models_cfg['torch_mlp']
@@ -239,12 +233,10 @@ class Decoder:
                 lr=m_cfg.get('learning_rate', 0.001),
                 batch_size=m_cfg.get('batch_size', 32)
             ))
-            self.sliding_window_flags['torch_mlp'] = m_cfg.get('use_sliding_window', True)
 
         if not self.pipelines:
             print("[WARN] No models enabled in config! Defaulting to LDA.")
             self.pipelines['lda'] = make_pipeline(StandardScaler(), LinearDiscriminantAnalysis(solver='lsqr', shrinkage='auto'))
-            self.sliding_window_flags['lda'] = False
 
     def _extract_haufe_patterns(self, fitted_estimator, X_train):
         """Compute Haufe activation patterns for fitted linear estimators.
@@ -344,28 +336,18 @@ class Decoder:
             return results, patterns
         
         cv = StratifiedKFold(n_splits=self.n_folds, shuffle=True, random_state=r)
-        use_sliding_window = self.sliding_window_flags.get(model_name, False)
-        
-        if use_sliding_window:
-            slider = SlidingEstimator(clone(clf), scoring='accuracy', n_jobs=1, verbose=False)
-            for f_idx, (train, test) in enumerate(cv.split(X_avg[:, 0, 0], y_avg)):
-                slider.fit(X_avg[train], y_avg[train])
-                scores = slider.score(X_avg[test], y_avg[test])
-                
-                for b, acc in enumerate(scores):
-                    results.append({
-                        'model': model_name,
-                        'repeat': r,
-                        'fold': f_idx,
-                        'time_bin': b,
-                        'accuracy': acc
-                    })
+        for b in range(n_bins):
+            X_bin = X_avg[:, :, b]
+            fold_accs = []
+            
+            for f_idx, (train, test) in enumerate(cv.split(X_bin, y_avg)):
+                my_clf = clone(clf)
+                my_clf.fit(X_bin[train], y_avg[train])
+                pred = my_clf.predict(X_bin[test])
+                fold_accs.append(accuracy_score(y_avg[test], pred))
 
-                # Haufe patterns per time-bin estimator (linear models only)
-                for b, est_b in enumerate(slider.estimators_):
-                    patt, row_labels = self._extract_haufe_patterns(est_b, X_avg[train, :, b])
-                    if patt is None:
-                        continue
+                patt, row_labels = self._extract_haufe_patterns(my_clf, X_bin[train])
+                if patt is not None:
                     for row_idx in range(patt.shape[0]):
                         for ch_idx, ch_name in enumerate(ch_names):
                             patterns.append({
@@ -379,41 +361,15 @@ class Decoder:
                                 'channel': ch_name,
                                 'pattern_value': float(patt[row_idx, ch_idx])
                             })
-        else:
-            for b in range(n_bins):
-                X_bin = X_avg[:, :, b]
-                fold_accs = []
-                
-                for f_idx, (train, test) in enumerate(cv.split(X_bin, y_avg)):
-                    my_clf = clone(clf)
-                    my_clf.fit(X_bin[train], y_avg[train])
-                    pred = my_clf.predict(X_bin[test])
-                    fold_accs.append(accuracy_score(y_avg[test], pred))
-
-                    patt, row_labels = self._extract_haufe_patterns(my_clf, X_bin[train])
-                    if patt is not None:
-                        for row_idx in range(patt.shape[0]):
-                            for ch_idx, ch_name in enumerate(ch_names):
-                                patterns.append({
-                                    'model': model_name,
-                                    'repeat': r,
-                                    'fold': f_idx,
-                                    'time_bin': b,
-                                    'pattern_row': row_idx,
-                                    'pattern_label': row_labels[row_idx],
-                                    'channel_idx': ch_idx,
-                                    'channel': ch_name,
-                                    'pattern_value': float(patt[row_idx, ch_idx])
-                                })
-                
-                for f_idx, acc in enumerate(fold_accs):
-                    results.append({
-                        'model': model_name,
-                        'repeat': r,
-                        'fold': f_idx,
-                        'time_bin': b,
-                        'accuracy': acc
-                    })
+            
+            for f_idx, acc in enumerate(fold_accs):
+                results.append({
+                    'model': model_name,
+                    'repeat': r,
+                    'fold': f_idx,
+                    'time_bin': b,
+                    'accuracy': acc
+                })
         return results, patterns
 
     def run(self, X, y, ch_names):

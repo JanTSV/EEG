@@ -10,17 +10,22 @@ DECODING_SCRIPT="${CODE_DIR}/02_decoding.py"
 PLOTTING_SCRIPT="${CODE_DIR}/03_plot_decoding_results.py"
 
 FIGURES_ONLY=false
+OVERRIDE=false
 for arg in "$@"; do
   case "$arg" in
     --figures-only)
       FIGURES_ONLY=true
       ;;
+    --override)
+      OVERRIDE=true
+      ;;
     -h|--help)
       cat <<'EOF'
-Usage: run_decoding_all_derivatives.sh [--figures-only]
+Usage: run_decoding_all_derivatives.sh [--figures-only] [--override]
 
 Options:
   --figures-only   Regenerate figures for all derivative folders only (no decoding, no skip).
+  --override       Force re-run and overwrite outputs even if results_decoding already exists.
   -h, --help       Show this help.
 EOF
       exit 0
@@ -67,7 +72,7 @@ for DERIV_ROOT in "${DERIV_DIRS[@]}"; do
   RESULTS_DIR="${DERIV_ROOT}/results_decoding"
   FIGURES_DIR="${DERIV_ROOT}/figures_decoding"
 
-  if [[ "${FIGURES_ONLY}" == false && -d "${RESULTS_DIR}" ]]; then
+  if [[ "${FIGURES_ONLY}" == false && "${OVERRIDE}" == false && -d "${RESULTS_DIR}" ]]; then
     echo "[SKIP] ${DERIV_ROOT} (results_decoding exists)"
     continue
   fi
@@ -77,6 +82,15 @@ for DERIV_ROOT in "${DERIV_DIRS[@]}"; do
   else
     echo "[RUN ] ${DERIV_ROOT}"
   fi
+
+  if [[ "${OVERRIDE}" == true ]]; then
+    if [[ "${FIGURES_ONLY}" == true ]]; then
+      rm -rf "${FIGURES_DIR}"
+    else
+      rm -rf "${RESULTS_DIR}" "${FIGURES_DIR}"
+    fi
+  fi
+
   mkdir -p "${RESULTS_DIR}" "${FIGURES_DIR}"
 
   python3 - "${CONFIG_PATH}" "${DATA_ROOT}" "${DERIV_ROOT}" "${RESULTS_DIR}" "${FIGURES_DIR}" <<'PY'
