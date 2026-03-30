@@ -2,101 +2,21 @@ import yaml
 import mne
 import numpy as np
 import pandas as pd
+import warnings
 from pathlib import Path
 
 # ML Imports
 from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
 from sklearn.svm import SVC
 from sklearn.linear_model import LogisticRegression, RidgeClassifier
+from sklearn.neural_network import MLPClassifier
 from sklearn.model_selection import StratifiedKFold
 from sklearn.preprocessing import StandardScaler
 from sklearn.pipeline import make_pipeline
 from sklearn.metrics import accuracy_score
-from sklearn.base import BaseEstimator, ClassifierMixin
 from sklearn.base import clone
+from sklearn.exceptions import ConvergenceWarning
 from joblib import Parallel, delayed
-
-# PyTorch Imports
-import torch
-import torch.nn as nn
-import torch.optim as optim
-
-# =============================================================================
-# PyTorch Estimator (Simple MLP to compare with linear models)
-# =============================================================================
-class TorchMLP(nn.Module):
-    def __init__(self, input_dim, hidden_dim, n_classes):
-        super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(input_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Dropout(0.2),
-            nn.Linear(hidden_dim, n_classes)
-        )
-    def forward(self, x):
-        # Flatten if input is 3D
-        if x.dim() > 2:
-            x = x.view(x.size(0), -1)
-        return self.net(x)
-
-class PyTorchEstimator(BaseEstimator, ClassifierMixin):
-    def __init__(self, hidden_dim=64, lr=0.001, epochs=50, batch_size=32):
-        self.hidden_dim = hidden_dim
-        self.lr = lr
-        self.epochs = epochs
-        self.batch_size = batch_size
-        self.model_ = None
-        self.classes_ = None
-        self.label_map_ = None
-
-    def fit(self, X, y):
-        self.classes_ = np.unique(y)
-        n_classes = len(self.classes_)
-        
-        X_t = torch.FloatTensor(X)
-        
-        # Map labels to 0-indexed for PyTorch CrossEntropyLoss
-        self.label_map_ = {val: idx for idx, val in enumerate(self.classes_)}
-        y_mapped = np.array([self.label_map_[val] for val in y])
-        y_t = torch.LongTensor(y_mapped)
-        
-        channels = X.shape[1]
-        samples = X.shape[2] if len(X.shape) > 2 else 1
-        input_dim = channels * samples
-        
-        self.model_ = TorchMLP(input_dim, self.hidden_dim, n_classes)
-            
-        optimizer = optim.Adam(self.model_.parameters(), lr=self.lr)
-        criterion = nn.CrossEntropyLoss()
-        
-        dataset = torch.utils.data.TensorDataset(X_t, y_t)
-        loader = torch.utils.data.DataLoader(dataset, batch_size=self.batch_size, shuffle=True)
-        
-        self.model_.train()
-        for _ in range(self.epochs):
-            for xb, yb in loader:
-                optimizer.zero_grad()
-                outputs = self.model_(xb)
-                loss = criterion(outputs, yb)
-                loss.backward()
-                optimizer.step()
-        return self
-
-    def predict(self, X):
-        self.model_.eval()
-        with torch.no_grad():
-            X_t = torch.FloatTensor(X)
-            outputs = self.model_(X_t)
-            _, predicted_mapped = torch.max(outputs.data, 1)
-        
-        # Map back to original labels
-        predicted_mapped = predicted_mapped.numpy()
-        reverse_map = {idx: val for val, idx in self.label_map_.items()}
-        return np.array([reverse_map[idx] for idx in predicted_mapped])
-
-    def score(self, X, y):
-        preds = self.predict(X)
-        return np.mean(preds == y)
 
 # =============================================================================
 # CLASS: Feature Extractor (Unchanged logic, cleaner implementation)
@@ -225,14 +145,27 @@ class Decoder:
             m_cfg = self.models_cfg['ridge']
             self.pipelines['ridge'] = make_pipeline(StandardScaler(), RidgeClassifier(alpha=m_cfg.get('alpha', 1.0)))
 
-        if self.models_cfg.get('torch_mlp', {}).get('enabled', False):
-            m_cfg = self.models_cfg['torch_mlp']
-            self.pipelines['torch_mlp'] = make_pipeline(StandardScaler(), PyTorchEstimator(
-                hidden_dim=m_cfg.get('hidden_dim', 64), 
-                epochs=m_cfg.get('epochs', 50), 
-                lr=m_cfg.get('learning_rate', 0.001),
-                batch_size=m_cfg.get('batch_size', 32)
-            ))
+        if self.models_cfg.get('mlp', {}).get('enabled', False):
+            mlp_cfg = self.models_cfg['mlp']
+            hidden_dim = mlp_cfg.get('hidden_dim', 64)
+            self.pipelines['mlp'] = make_pipeline(
+                StandardScaler(),
+                MLPClassifier(
+                    hidden_layer_sizes=(hidden_dim,),
+                    activation=mlp_cfg.get('activation', 'relu'),
+                    solver=mlp_cfg.get('solver', 'adam'),
+                    learning_rate_init=mlp_cfg.get('learning_rate', 0.001),
+                    alpha=mlp_cfg.get('alpha', 1e-4),
+                    batch_size=mlp_cfg.get('batch_size', 32),
+                    learning_rate=mlp_cfg.get('learning_rate_schedule', 'constant'),
+                    early_stopping=mlp_cfg.get('early_stopping', True),
+                    validation_fraction=mlp_cfg.get('validation_fraction', 0.1),
+                    n_iter_no_change=mlp_cfg.get('n_iter_no_change', 15),
+                    tol=mlp_cfg.get('tol', 1e-3),
+                    max_iter=mlp_cfg.get('epochs', 300),
+                    random_state=0,
+                ),
+            )
 
         if not self.pipelines:
             print("[WARN] No models enabled in config! Defaulting to LDA.")
@@ -323,8 +256,6 @@ class Decoder:
         return np.array(X_new), np.array(y_new)
 
     def _run_single_repeat(self, r, X_clean, y_clean, clf, model_name, n_bins, ch_names):
-        import torch
-        torch.set_num_threads(1)
         results = []
         patterns = []
         X_avg, y_avg = self._create_super_trials(X_clean, y_clean, seed=r)
@@ -342,7 +273,12 @@ class Decoder:
             
             for f_idx, (train, test) in enumerate(cv.split(X_bin, y_avg)):
                 my_clf = clone(clf)
-                my_clf.fit(X_bin[train], y_avg[train])
+                if model_name == 'mlp':
+                    with warnings.catch_warnings():
+                        warnings.filterwarnings('ignore', category=ConvergenceWarning)
+                        my_clf.fit(X_bin[train], y_avg[train])
+                else:
+                    my_clf.fit(X_bin[train], y_avg[train])
                 pred = my_clf.predict(X_bin[test])
                 fold_accs.append(accuracy_score(y_avg[test], pred))
 

@@ -6,8 +6,8 @@
 paths:
   bids_root: "/home/miliczpl/MySSD/Code/EEG/data"
   deriv_root: "/home/miliczpl/MySSD/Code/EEG/data/derivatives__0.1-100.0hz_notch50+100_no_ica"
-  results_dir: "/home/miliczpl/MySSD/Code/EEG/data/derivatives__0.1-100.0hz_notch50+100_no_ica/results_decoding"
-  figures_dir: "/home/miliczpl/MySSD/Code/EEG/data/derivatives__0.1-100.0hz_notch50+100_no_ica/figures_decoding"
+  results_dir: "/home/miliczpl/MySSD/Code/EEG/data/derivatives__0.1-100.0hz_notch50+100_no_ica/results_decoding_mlp"
+  figures_dir: "/home/miliczpl/MySSD/Code/EEG/data/derivatives__0.1-100.0hz_notch50+100_no_ica/figures_decoding_mlp"
 
 subjects:
   # Liste aller validen Subjects (Bad subjects 10, 23, 24 ausgeschlossen)
@@ -92,9 +92,17 @@ models:
     enabled: true
     alpha: 1.0
   # Simple MLP on single-bin input for fair comparison with linear models
-  torch_mlp:
-    enabled: false
+  mlp:
+    enabled: true
     hidden_dim: 64
-    epochs: 50
-    learning_rate: 0.001
+    epochs: 300
+    learning_rate: 0.0005
     batch_size: 32
+    alpha: 0.0005
+    activation: "relu"
+    solver: "adam"
+    learning_rate_schedule: "adaptive"
+    early_stopping: true
+    validation_fraction: 0.1
+    n_iter_no_change: 15
+    tol: 0.001
