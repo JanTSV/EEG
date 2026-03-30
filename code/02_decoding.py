@@ -2,7 +2,6 @@ import yaml
 import mne
 import numpy as np
 import pandas as pd
-import warnings
 from pathlib import Path
 
 # ML Imports
@@ -15,7 +14,6 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.pipeline import make_pipeline
 from sklearn.metrics import accuracy_score
 from sklearn.base import clone
-from sklearn.exceptions import ConvergenceWarning
 from joblib import Parallel, delayed
 
 # =============================================================================
@@ -146,23 +144,12 @@ class Decoder:
             self.pipelines['ridge'] = make_pipeline(StandardScaler(), RidgeClassifier(alpha=m_cfg.get('alpha', 1.0)))
 
         if self.models_cfg.get('mlp', {}).get('enabled', False):
-            mlp_cfg = self.models_cfg['mlp']
-            hidden_dim = mlp_cfg.get('hidden_dim', 64)
+            m_cfg = self.models_cfg['mlp']
             self.pipelines['mlp'] = make_pipeline(
                 StandardScaler(),
                 MLPClassifier(
-                    hidden_layer_sizes=(hidden_dim,),
-                    activation=mlp_cfg.get('activation', 'relu'),
-                    solver=mlp_cfg.get('solver', 'adam'),
-                    learning_rate_init=mlp_cfg.get('learning_rate', 0.001),
-                    alpha=mlp_cfg.get('alpha', 1e-4),
-                    batch_size=mlp_cfg.get('batch_size', 32),
-                    learning_rate=mlp_cfg.get('learning_rate_schedule', 'constant'),
-                    early_stopping=mlp_cfg.get('early_stopping', True),
-                    validation_fraction=mlp_cfg.get('validation_fraction', 0.1),
-                    n_iter_no_change=mlp_cfg.get('n_iter_no_change', 15),
-                    tol=mlp_cfg.get('tol', 1e-3),
-                    max_iter=mlp_cfg.get('epochs', 300),
+                    hidden_layer_sizes=tuple(m_cfg.get('hidden_layer_sizes', [64, 32])),
+                    max_iter=m_cfg.get('max_iter', 1000),
                     random_state=0,
                 ),
             )
@@ -273,12 +260,7 @@ class Decoder:
             
             for f_idx, (train, test) in enumerate(cv.split(X_bin, y_avg)):
                 my_clf = clone(clf)
-                if model_name == 'mlp':
-                    with warnings.catch_warnings():
-                        warnings.filterwarnings('ignore', category=ConvergenceWarning)
-                        my_clf.fit(X_bin[train], y_avg[train])
-                else:
-                    my_clf.fit(X_bin[train], y_avg[train])
+                my_clf.fit(X_bin[train], y_avg[train])
                 pred = my_clf.predict(X_bin[test])
                 fold_accs.append(accuracy_score(y_avg[test], pred))
 

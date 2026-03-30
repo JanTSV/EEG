@@ -521,6 +521,10 @@ def plot_fig2(df, out_dir, model_name, cfg, df_haufe=None):
             d_acc = df[df["target"] == tgt]
             selected_haufe_by_target[tgt] = _select_pattern_component(d, df_acc_t=d_acc)
 
+    has_any_haufe = any(
+        d is not None and not d.empty for d in selected_haufe_by_target.values()
+    )
+
     global_topo_vmax = None
     if selected_haufe_by_target:
         vals = [
@@ -536,13 +540,22 @@ def plot_fig2(df, out_dir, model_name, cfg, df_haufe=None):
     for i, tgt in enumerate(targets):
         row = i // n_cols
         col = i % n_cols
-        panel = GridSpecFromSubplotSpec(
-            3,
-            1,
-            subplot_spec=outer[row, col],
-            height_ratios=[3, 0.25, 2.1],
-            hspace=0.14,
-        )
+        if has_any_haufe:
+            panel = GridSpecFromSubplotSpec(
+                3,
+                1,
+                subplot_spec=outer[row, col],
+                height_ratios=[3, 0.25, 2.1],
+                hspace=0.14,
+            )
+        else:
+            panel = GridSpecFromSubplotSpec(
+                2,
+                1,
+                subplot_spec=outer[row, col],
+                height_ratios=[3, 0.25],
+                hspace=0.14,
+            )
         df_t = df[df["target"] == tgt]
 
         # Main
@@ -585,19 +598,21 @@ def plot_fig2(df, out_dir, model_name, cfg, df_haufe=None):
         ax_s.set_xticks([])
 
         # Haufe topoplots (1 map per 4 bins = 1 second)
-        ax_topo_spec = panel[2]
-        df_haufe_t = selected_haufe_by_target.get(tgt, None)
-        _plot_haufe_topomap_row(
-            ax_topo_spec,
-            df_haufe_t,
-            n_bins=len(bins),
-            bin_width_s=bin_width_s,
-            show_time_axis=(row == n_rows - 1),
-            show_colorbar=(col == n_cols - 1),
-            fixed_vmax=global_topo_vmax,
-        )
+        if has_any_haufe:
+            ax_topo_spec = panel[2]
+            df_haufe_t = selected_haufe_by_target.get(tgt, None)
+            _plot_haufe_topomap_row(
+                ax_topo_spec,
+                df_haufe_t,
+                n_bins=len(bins),
+                bin_width_s=bin_width_s,
+                show_time_axis=(row == n_rows - 1),
+                show_colorbar=(col == n_cols - 1),
+                fixed_vmax=global_topo_vmax,
+            )
 
-    fig.text(0.012, 0.22, "Haufe patterns", rotation=90, ha="center", va="center", fontsize=8, color="#666")
+    if has_any_haufe:
+        fig.text(0.012, 0.22, "Haufe patterns", rotation=90, ha="center", va="center", fontsize=8, color="#666")
 
     # Hide any unused grid cell(s)
     total_cells = n_rows * n_cols
