@@ -32,6 +32,16 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 
 
+def _find_repo_root(start: Path) -> Path:
+    """Find repository root by walking upwards for pyproject.toml."""
+    for p in [start, *start.parents]:
+        if (p / "pyproject.toml").exists():
+            return p
+    raise FileNotFoundError(
+        f"Could not locate repository root from: {start} (missing pyproject.toml)"
+    )
+
+
 def _normalize_run_label(run_dir: Path) -> str:
     name = run_dir.name
     for prefix in ("derivatives__", "derivatives_", "derivatives"):
@@ -94,6 +104,7 @@ def rank_model_runs(
     out_csv: Path,
     chance_level: float = 33.33,
     trim_proportion: float = 0.20,
+    exclude_targets: tuple[str, ...] = ("Outcome",),
 ) -> pd.DataFrame:
     run_dirs = _find_run_result_dirs(data_root)
     if not run_dirs:
@@ -105,6 +116,11 @@ def rank_model_runs(
         df = _load_single_run(results_dir)
         if df.empty:
             continue
+
+        if exclude_targets:
+            df = df[~df["target"].isin(exclude_targets)].copy()
+            if df.empty:
+                continue
 
         # area over chance per subject/target/model
         df = df.assign(aoc=df["accuracy"] - float(chance_level))
@@ -141,6 +157,7 @@ def rank_model_runs(
                     "subject_mad": mad,
                     "n_subjects": int(dmod["subject"].nunique()),
                     "n_targets": int(subj_target_model[subj_target_model["model"] == model]["target"].nunique()),
+                    "excluded_targets": ",".join(exclude_targets) if exclude_targets else "",
                     "chance_level": float(chance_level),
                     "trim_proportion": float(trim_proportion),
                     "results_dir": str(results_dir),
@@ -243,19 +260,21 @@ def plot_top_model_runs(
 
 
 def parse_args() -> argparse.Namespace:
+    repo_root = _find_repo_root(Path(__file__).resolve())
+
     parser = argparse.ArgumentParser(
         description="Rank decoding model+run combinations (e.g., lda_no_ica) across derivatives runs."
     )
     parser.add_argument(
         "--data-root",
         type=Path,
-        default=Path("data"),
+        default=repo_root / "data",
         help="Root containing derivatives* folders (default: data)",
     )
     parser.add_argument(
         "--out",
         type=Path,
-        default=Path("results_decoding/model_run_ranking.csv"),
+        default=repo_root / "results_decoding" / "model_run_ranking.csv",
         help="Output CSV path (default: results_decoding/model_run_ranking.csv)",
     )
     parser.add_argument(
@@ -271,15 +290,21 @@ def parse_args() -> argparse.Namespace:
         help="Proportion to trim from each tail across subjects (default: 0.20)",
     )
     parser.add_argument(
+        "--exclude-targets",
+        nargs="*",
+        default=["Outcome"],
+        help="Targets to exclude from ranking (default: Outcome)",
+    )
+    parser.add_argument(
         "--top-n",
-        type=int,
-        default=10,
-        help="Top N model_run rows to plot (default: 10)",
+        type=str,
+        default="10",
+        help="Top N model_run rows to plot, or 'all' (default: 10)",
     )
     parser.add_argument(
         "--plot-out",
         type=Path,
-        default=Path("results_decoding/model_run_ranking_topN.png"),
+        default=repo_root / "results_decoding" / "model_run_ranking_topN.png",
         help="Output path for top-N bar plot (PNG; PDF/SVG also saved)",
     )
     parser.add_argument(
@@ -298,16 +323,28 @@ def main() -> int:
         out_csv=args.out,
         chance_level=args.chance_level,
         trim_proportion=args.trim_proportion,
+        exclude_targets=tuple(args.exclude_targets),
     )
 
     if not args.no_plot:
+        top_n_raw = str(args.top_n).strip().lower()
+        if top_n_raw == "all":
+            top_n = len(ranking)
+        else:
+            try:
+                top_n = int(args.top_n)
+            except ValueError as exc:
+                raise ValueError("--top-n must be a positive integer or 'all'") from exc
+            if top_n <= 0:
+                raise ValueError("--top-n must be >= 1 or 'all'")
+
         plot_path = plot_top_model_runs(
             ranking=ranking,
             out_path=args.plot_out,
-            top_n=args.top_n,
+            top_n=top_n,
             score_col="score_trimmed_aoc",
         )
-        print(f"Saved top-{args.top_n} bar plot to: {plot_path}")
+        print(f"Saved top-{top_n} bar plot to: {plot_path}")
 
     print(f"Saved ranking to: {args.out}")
     print(ranking.head(15).to_string(index=False))
