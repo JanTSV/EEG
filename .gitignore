@@ -6,8 +6,7 @@ data/
 tmp/
 
 #backup results
-results_EEG_backup/
-
+*backup*/
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
