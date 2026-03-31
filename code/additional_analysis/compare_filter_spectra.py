@@ -1,4 +1,6 @@
-"""Run sub-03 preprocessing with 3 filter setups and plot spectra comparison.
+"""
+This script is only used for 1 plot in the final report.
+The spectra per run can be found in the figures folder!
 
 This script is intentionally isolated from existing derivatives/results.
 All outputs are written into a new temporary folder that can be deleted safely.

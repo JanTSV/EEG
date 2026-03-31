@@ -1,3 +1,23 @@
+"""
+Create the final decoding figures for the EEG project.
+
+This script reads the aggregated decoding outputs produced by the decoding
+pipeline and generates the figures used in the final project
+report:
+
+- a grand-average comparison across models,
+- per-model time-resolved decoding plots,
+- significance strips for exploratory inference,
+- and Haufe-pattern topographies for linear models where such patterns are
+    available.
+
+The plotting code is intentionally configuration-driven so that the visual
+results remain aligned with the decoding setup and the final written report.
+The script expects the decoding CSV files to already exist in the configured
+results directory and writes the figures in multiple formats for report and
+presentation reuse.
+"""
+
 import yaml
 import pandas as pd
 import numpy as np
@@ -41,12 +61,14 @@ TOPO_SCALE_PERCENTILE = 90.0
 
 
 def _compute_y_ticks(y_min, y_max, step=5):
+    """Return evenly spaced y-axis ticks covering the requested range."""
     lo = int(np.floor(y_min / step) * step)
     hi = int(np.ceil(y_max / step) * step)
     return np.arange(lo, hi + step, step)
 
 
 def _style_accuracy_axis(ax, y_min, y_max):
+    """Apply the common accuracy-axis styling used by all figure panels."""
     ax.set_ylim(y_min, y_max)
     ax.set_yticks(np.arange(32, 40.1, 2))
     ax.grid(axis="y", color="#cfcfcf", linewidth=0.6, alpha=0.45)
@@ -54,6 +76,7 @@ def _style_accuracy_axis(ax, y_min, y_max):
 
 
 def _strip_legend_handles():
+    """Create the legend entries used for the significance strip encoding."""
     return [
         Patch(facecolor=COLORS["heatmap"][0], edgecolor="#999", label="ns"),
         Patch(facecolor=COLORS["heatmap"][1], edgecolor="#999", label="p < .05"),
@@ -63,7 +86,7 @@ def _strip_legend_handles():
 
 
 def _add_split_legends(fig, accuracy_handles, significance_handles, y=1.01):
-    """Add two separate figure legends for better readability."""
+    """Add separate legends for accuracy curves and significance strips."""
     leg_acc = fig.legend(
         handles=accuracy_handles,
         title="Accuracy",
@@ -93,17 +116,26 @@ def _add_split_legends(fig, accuracy_handles, significance_handles, y=1.01):
 
 
 def _save_figure_all_formats(fig, out_file_png):
+    """Save one figure as PNG, PDF, and SVG for report and presentation use."""
     fig.savefig(out_file_png, dpi=300)
     fig.savefig(out_file_png.with_suffix(".pdf"))
     fig.savefig(out_file_png.with_suffix(".svg"))
 
 
 def load_config():
+    """Load the decoding configuration from the project YAML file."""
     with open("code/config_decoding.yaml", "r") as f:
         return yaml.safe_load(f)
 
 
 def aggregate_data(results_dir):
+    """
+    Load all decoding result CSVs for one analysis folder and average repeats.
+
+    The input files are concatenated, accuracy values are converted to percent,
+    and then the data are collapsed to subject-level time courses for each
+    target, player status, and model.
+    """
     all_files = list(results_dir.glob("*_decoding_results.csv"))
     if not all_files:
         raise FileNotFoundError("No CSVs found.")
@@ -126,6 +158,13 @@ def aggregate_data(results_dir):
 
 
 def aggregate_haufe_data(results_dir):
+    """
+    Load and average Haufe-pattern CSV files for all subjects in one run.
+
+    The function returns ``None`` if no valid Haufe files are available. This
+    keeps the plotting code simple for models that do not produce Haufe
+    patterns, such as the nonlinear MLP baseline.
+    """
     all_files = list(results_dir.glob("*_haufe_patterns.csv"))
     if not all_files:
         return None
@@ -165,6 +204,7 @@ def aggregate_haufe_data(results_dir):
 
 
 def _safe_corr(a, b):
+    """Compute a numerically safe Pearson correlation coefficient."""
     if a is None or b is None:
         return np.nan
     if np.std(a) <= 1e-12 or np.std(b) <= 1e-12:
@@ -174,7 +214,24 @@ def _safe_corr(a, b):
 
 
 def _split_half_reliability(subject_maps, rng, n_iter=60):
-    """subject_maps shape: (n_subjects, n_channels)."""
+    """
+    Estimate split-half reliability for a set of subject maps.
+
+    Parameters
+    ----------
+    subject_maps : ndarray, shape (n_subjects, n_channels)
+        One spatial map per subject.
+    rng : numpy.random.Generator
+        Random number generator used to draw repeated split-half partitions.
+    n_iter : int, default=60
+        Number of random split-half repetitions.
+
+    Returns
+    -------
+    float
+        Median split-half correlation across repetitions, or ``NaN`` if the
+        estimate cannot be computed reliably.
+    """
     n_sub = subject_maps.shape[0]
     if n_sub < 4:
         return np.nan
@@ -208,6 +265,7 @@ def _split_half_reliability(subject_maps, rng, n_iter=60):
 
 
 def _zscore_series(x):
+    """Z-score an array while safely handling empty or constant inputs."""
     x = np.asarray(x, dtype=float)
     mu = np.nanmean(x)
     sd = np.nanstd(x)
@@ -219,11 +277,18 @@ def _zscore_series(x):
 
 
 def _select_pattern_component(df_haufe_t, df_acc_t=None):
-    """Select one Haufe component using hybrid stability + relevance score.
+    """
+    Select the most suitable Haufe component for visualization.
 
-    Score per component: S = z(R) + z(A)
-      R: median split-half reliability of subject maps (averaged across bins)
-      A: significant-bin weighted pattern strength
+    The selection combines two criteria:
+
+    - ``R``: median split-half reliability of the subject maps, averaged across
+        time bins.
+    - ``A``: a relevance score derived from the absolute pattern strength in
+        bins that show evidence above chance in the decoding results.
+
+    The final score is ``S = z(R) + z(A)``. If at least one component reaches
+    a reasonable reliability threshold, only those components are considered.
     """
     if df_haufe_t is None or df_haufe_t.empty:
         return df_haufe_t
@@ -310,6 +375,26 @@ def _select_pattern_component(df_haufe_t, df_acc_t=None):
 
 
 def get_p_values(df, target, bins, mode="one_sample"):
+    """
+    Compute bin-wise p-values for the significance strips.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        Decoding data for one target or one target/player-status subset.
+    target : str
+        Target label to filter by.
+    bins : array-like
+        Ordered time bins to evaluate.
+    mode : {"one_sample", "two_sample"}, default="one_sample"
+        Statistical test to apply. The one-sample test compares accuracy to
+        chance; the two-sample test compares Winner and Loser trials.
+
+    Returns
+    -------
+    list[float]
+        P-values, one per time bin.
+    """
     p_vals = []
     for t in bins:
         d = df[(df["target"] == target) & (df["time_bin"] == t)]
@@ -324,7 +409,7 @@ def get_p_values(df, target, bins, mode="one_sample"):
 
 
 def plot_heatmap(ax, p_vals, n_bins, bin_width_s=0.25):
-    """Plots the significance strip."""
+    """Render a compact significance strip using discrete p-value classes."""
     map_vals = np.zeros((1, n_bins))
     for i, p in enumerate(p_vals):
         if p < 0.001:
@@ -352,7 +437,7 @@ def plot_heatmap(ax, p_vals, n_bins, bin_width_s=0.25):
 
 
 def style_phase_background(ax, x_scale=1.0):
-    """Applies colored phase backgrounds and labels."""
+    """Add the phase background shading and phase labels to a plot panel."""
     for start, end, label, color in PHASES:
         start_x = start * x_scale
         end_x = end * x_scale
@@ -382,7 +467,15 @@ def _plot_haufe_topomap_row(
     show_colorbar=True,
     fixed_vmax=None,
 ):
-    """Plot one topomap per 4 bins (1 second per topomap)."""
+    """
+    Plot one Haufe topomap for each group of four time bins.
+
+    The plots are arranged as a compact row of scalp maps so that longer time
+    windows can be summarized without overwhelming the main decoding traces.
+    The function supports an optional shared color scale to make comparisons
+    across targets visually consistent and falls back to a placeholder message
+    when no Haufe patterns are available.
+    """
     if df_haufe_t is None or df_haufe_t.empty:
         ax_empty = plt.subplot(subspec)
         ax_empty.axis("off")
@@ -498,6 +591,13 @@ def _plot_haufe_topomap_row(
 
 
 def plot_fig2(df, out_dir, model_name, cfg, df_haufe=None):
+    """
+    Plot the main decoding figure for one model.
+
+    This panel shows the time-resolved mean accuracy per target, a
+    chance-level reference line, a significance strip, and Haufe topographies
+    when available.
+    """
     print(f"Plotting Figure 2 (Polished) for {model_name}...")
     
     y_min = 31
@@ -635,6 +735,13 @@ def plot_fig2(df, out_dir, model_name, cfg, df_haufe=None):
 
 
 def plot_fig3(df, out_dir, model_name, cfg):
+    """
+    Plot the Winner-versus-Loser decoding figure for one model.
+
+    The figure contains the two condition-specific accuracy traces plus three
+    significance strips: one for Winner trials, one for Loser trials, and one
+    for their direct comparison.
+    """
     print(f"Plotting Figure 3 (Polished Split) for {model_name}...")
     
     y_min = 31
@@ -749,6 +856,13 @@ def plot_fig3(df, out_dir, model_name, cfg):
 
 
 def plot_model_comparison(df, out_dir, cfg):
+    """
+    Plot a cross-model comparison for each available decoding target.
+
+    This summary is useful for quickly checking whether one preprocessing or
+    decoding variant consistently outperforms the others across the full time
+    course.
+    """
     print("Plotting Model Comparison...")
     
     y_min = 31
@@ -832,6 +946,13 @@ def plot_model_comparison(df, out_dir, cfg):
 
 
 def run():
+    """
+    Execute the full plotting workflow.
+
+    The function loads the configuration, aggregates the decoding outputs,
+    produces the model comparison figure when multiple models are available,
+    and then generates the per-model decoding figures.
+    """
     cfg = load_config()
     res_dir = Path(cfg['paths']['results_dir'])
     fig_dir = Path(cfg['paths']['figures_dir'])
