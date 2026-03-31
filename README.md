@@ -76,13 +76,13 @@ The ranking helper does expose a small CLI for convenience:
 uv sync
 
 # Run preprocessing directly
-uv run python code/01_preprocess.py
+uv run code/01_preprocess.py
 
 # Run decoding directly
-uv run python code/02_decoding.py
+uv run code/02_decoding.py
 
 # Create decoding figures directly
-uv run python code/03_plot_decoding_results.py
+uv run code/03_plot_decoding_results.py
 
 # Rank all model/run combinations directly
 uv run code/additional_analysis/rank_model_runs.py --top-n all
