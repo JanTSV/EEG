@@ -174,8 +174,9 @@ It can rank a limited number of top entries or all available combinations.
 Typical outputs are stored under:
 
 - `data/derivatives*` — preprocessing variants and intermediate outputs
-- `data/results_decoding/` — decoding CSV files and ranking outputs
-- `figures/` — final figures used in the report
+- `data/derivatives*/results_decoding/` — decoding CSV files and Haufe pattern outputs (per derivative run)
+- `data/derivatives*/figures_decoding/` — plotting outputs generated for each derivative run
+- `results_decoding/` — aggregated cross-run ranking outputs (e.g., model comparison tables/plots)
 
 ## Debugging & Validation
 
@@ -269,11 +270,11 @@ flowchart TD
     A[Local data/ folder with BIDS EEG files] --> B[01_preprocess.py]
     B --> C[Preprocessed FIF epochs in data/]
     C --> D[02_decoding.py]
-    D --> E[Decoding CSVs and Haufe patterns in results_decoding/]
+  D --> E[Decoding CSVs and Haufe patterns in data/derivatives*/results_decoding/]
     E --> F[03_plot_decoding_results.py]
-    F --> G[Final figures in figures/]
+  F --> G[Final figures in data/derivatives*/figures_decoding/]
     E --> H[rank_model_runs.py]
-    H --> I[Model/run ranking CSV and top-N plots]
+  H --> I[Model/run ranking CSV and top-N plots in results_decoding/]
     J[run_decoding_all_derivatives.sh] --> D
     J --> F
 ```
