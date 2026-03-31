@@ -1,3 +1,28 @@
+"""
+Run the EEG decoding analysis.
+
+This script takes the preprocessed epochs created by the preprocessing
+pipeline, transforms them into the feature representation used for decoding,
+and evaluates several classification models in a repeated cross-validation
+scheme. The output consists of per-subject decoding CSV files and, for linear
+models, Haufe-pattern CSV files that can be used for interpretability figures.
+
+The workflow is fully driven by the YAML configuration file:
+
+- preprocessing windows and binning are controlled by ``config_decoding.yaml``,
+- model inclusion and hyperparameters are selected from the same file,
+- and subject inclusion/exclusion is read from the configuration as well.
+
+The implementation keeps the core decoding logic compact and reproducible:
+
+- trials are converted from volts to microvolts,
+- common-average referencing is applied,
+- block starts are removed,
+- feature windows are averaged into fixed-width time bins,
+- class-balanced super-trials are created,
+- and repeated stratified cross-validation is run for each enabled model.
+"""
+
 import yaml
 import mne
 import numpy as np
@@ -20,11 +45,15 @@ from joblib import Parallel, delayed
 # CLASS: Feature Extractor (Unchanged logic, cleaner implementation)
 # =============================================================================
 class FeatureExtractor:
+    """Convert preprocessed epochs into the binned feature representation used for decoding."""
+
     def __init__(self, config):
+        """Store the decoding configuration and set the expected sampling rate."""
         self.cfg = config['params']
         self.fs = 256 
 
     def _get_bins(self, data, start_offset_s, n_bins):
+        """Average a continuous epoch segment into a fixed number of time bins."""
         zero_idx = int(-start_offset_s * self.fs)
         bin_samples = int(self.cfg['bin_width'] * self.fs)
         binned_data = []
@@ -37,6 +66,20 @@ class FeatureExtractor:
         return np.stack(binned_data, axis=2)
 
     def transform(self, epochs):
+        """
+        Apply the complete feature-extraction pipeline to a set of epochs.
+
+        The transformation performs unit conversion, common-average reference,
+        removal of block-start trials, baseline correction, and bin-wise
+        averaging across the configured analysis windows.
+
+        Returns
+        -------
+        X : ndarray
+            Feature tensor with shape ``(n_trials, n_channels, n_bins)``.
+        keep_indices : list[int]
+            Indices of trials retained after block-start removal.
+        """
         # 1. Scale to uV
         data_uv = epochs.get_data() * 1e6
         times = epochs.times
@@ -78,12 +121,21 @@ class FeatureExtractor:
 # CLASS: Target Manager (Handles Prev Trials & Winner Status)
 # =============================================================================
 class TargetManager:
+    """Create the target vectors used by the decoding analysis."""
+
     def __init__(self, events_df, config):
+        """Store the events table and the decoding configuration."""
         self.events = events_df
         self.cfg = config
         
     def get_winner_status(self):
-        """Determines if current player (P1) is Winner or Loser."""
+        """
+        Determine whether the current participant is a Winner, Loser, or Draw.
+
+        The status is derived from the outcome column in the events table and
+        is later attached to the decoding output for the winner-vs-loser
+        figures.
+        """
         outcomes = self.events.iloc[:, 8].values
         p1_wins = np.sum(outcomes == 2)
         p2_wins = np.sum(outcomes == 3)
@@ -93,7 +145,21 @@ class TargetManager:
         else: return "Draw"
 
     def get_target(self, target_cfg, keep_indices):
-        """Returns y vector for specific target config."""
+        """
+        Return the target labels for one configured decoding target.
+
+        Parameters
+        ----------
+        target_cfg : dict
+            Target specification from the YAML configuration.
+        keep_indices : array-like
+            Trial indices retained by :class:`FeatureExtractor`.
+
+        Returns
+        -------
+        ndarray
+            Label vector aligned with the retained feature trials.
+        """
         if 'source' in target_cfg:
             src_name = target_cfg['source']
             src_cfg = next(t for t in self.cfg['targets'] if t['name'] == src_name)
@@ -116,7 +182,10 @@ class TargetManager:
 # CLASS: Decoder (With Safety Checks & Multi-Model Support)
 # =============================================================================
 class Decoder:
+    """Train and evaluate all enabled decoding models for one subject."""
+
     def __init__(self, config):
+        """Build the model pipelines and store the repeated-CV settings."""
         self.n_repeats = config['params']['n_repeats']
         self.n_avg = config['params']['n_super_trials']
         self.n_folds = config['params']['n_folds']
@@ -159,7 +228,12 @@ class Decoder:
             self.pipelines['lda'] = make_pipeline(StandardScaler(), LinearDiscriminantAnalysis(solver='lsqr', shrinkage='auto'))
 
     def _extract_haufe_patterns(self, fitted_estimator, X_train):
-        """Compute Haufe activation patterns for fitted linear estimators.
+        """
+        Compute Haufe activation patterns for fitted linear estimators.
+
+        The patterns are returned only when the estimator exposes a linear
+        coefficient vector. Nonlinear models such as the MLP do not contribute
+        Haufe patterns.
 
         Returns
         -------
@@ -225,6 +299,12 @@ class Decoder:
         return patterns, row_labels
 
     def _create_super_trials(self, X, y, seed):
+        """
+        Create class-balanced super-trials by averaging ``n_super_trials`` trials.
+
+        Super-trials reduce noise and keep the class balance controlled for the
+        repeated stratified cross-validation procedure.
+        """
         rng = np.random.RandomState(seed)
         classes = np.unique(y)
         X_new, y_new = [], []
@@ -243,6 +323,31 @@ class Decoder:
         return np.array(X_new), np.array(y_new)
 
     def _run_single_repeat(self, r, X_clean, y_clean, clf, model_name, n_bins, ch_names):
+        """
+        Run one repeated-CV decoding pass for a single model.
+
+        Parameters
+        ----------
+        r : int
+            Repeat index used for the random super-trial split and CV seed.
+        X_clean : ndarray
+            Cleaned feature tensor after trial filtering.
+        y_clean : ndarray
+            Target labels aligned with ``X_clean``.
+        clf : sklearn estimator
+            Base classifier pipeline.
+        model_name : str
+            Name used in the output tables.
+        n_bins : int
+            Number of time bins in the feature tensor.
+        ch_names : list[str]
+            Channel names used for Haufe-pattern export.
+
+        Returns
+        -------
+        tuple[list[dict], list[dict]]
+            Decoding accuracy rows and Haufe-pattern rows.
+        """
         results = []
         patterns = []
         X_avg, y_avg = self._create_super_trials(X_clean, y_clean, seed=r)
@@ -291,6 +396,20 @@ class Decoder:
         return results, patterns
 
     def run(self, X, y, ch_names):
+        """
+        Execute the full decoding workflow for one target and one subject.
+
+        This method filters invalid labels, checks that enough trials are
+        available, runs every enabled model for the configured number of
+        repeats, and returns both the decoding results and the optional Haufe
+        patterns.
+
+        Returns
+        -------
+        tuple[pandas.DataFrame | None, pandas.DataFrame | None]
+            Decoding results and Haufe-pattern tables, or ``None`` if decoding
+            could not be performed.
+        """
         # --- 1. DATA CLEANING (The Fix) ---
         invalid_mask = np.isin(y, self.clean_cfg['drop_values']) | np.isnan(y)
         valid_mask = ~invalid_mask
@@ -333,6 +452,13 @@ class Decoder:
 # MAIN
 # =============================================================================
 def run_pipeline():
+    """
+    Run the decoding analysis for all configured subjects and targets.
+
+    The pipeline loads the preprocessed epochs, builds features, extracts the
+    relevant target labels, runs the configured decoders, and writes one CSV
+    per subject for the decoding results and Haufe patterns.
+    """
     with open("code/config_decoding.yaml", 'r') as f: cfg = yaml.safe_load(f)
     
     deriv_root = Path(cfg['paths']['deriv_root'])
