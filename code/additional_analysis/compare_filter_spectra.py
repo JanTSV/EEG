@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Run sub-03 preprocessing with 3 filter setups and plot spectra comparison.
 
 This script is intentionally isolated from existing derivatives/results.

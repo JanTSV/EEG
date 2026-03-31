@@ -1,22 +1,59 @@
-#!/usr/bin/env python3
 """
 Rank decoding approaches across preprocessing runs.
 
-This script scans run folders like:
-  data/derivatives__no_ica/
-  data/derivatives__0.1-100.0hz_notch50+100_no_ica/
+---------------------
+This script provides the model-comparison summary used in the final version of
+the university project. It is designed to compare decoding performance across
+multiple preprocessing variants (for example, different filtering or ICA
+settings) while keeping the scoring procedure robust and easy to reproduce.
 
-For each run, it loads all CSVs in:
-  <run>/results_decoding/*_decoding_results.csv
+The main idea is to collapse the time-resolved decoding outputs into a single
+subject-level score per model and preprocessing run, then rank these model-run
+combinations using a robust group statistic.
 
-It then computes a robust per-model score:
-  1) subject-target-time average accuracy
-  2) area-over-chance (AOC) per subject+target+model
-  3) average AOC across targets per subject+model
-  4) trimmed mean across subjects per model (default trim=20%)
+Data layout
+-----------
+The script scans run folders such as:
+    data/derivatives__no_ica/
+    data/derivatives__0.1-100.0hz_notch50+100_no_ica/
 
-Output:
-  CSV ranking with rows like model_run = "lda_no_ica".
+For each run, it loads all CSV files in:
+    <run>/results_decoding/*_decoding_results.csv
+
+These CSVs are expected to come from the decoding pipeline and contain at
+minimum the columns ``subject``, ``target``, ``time_bin``, ``accuracy``, and
+``model``.
+
+Scoring pipeline
+---------------
+The script computes a robust per-model score in four steps:
+
+1. Subject-level averaging
+     Decoding accuracy is first averaged across repeated folds and repetitions
+     for each subject, target, time bin, and model.
+
+2. Area over chance (AOC)
+     Accuracy is converted into percentage points above the theoretical chance
+     level (default: 33.33% for a 3-class task).
+
+3. Subject-level summary
+     AOC is averaged across time bins and targets (with optional target
+     exclusions such as ``Outcome``), yielding one score per subject and model.
+
+4. Robust group summary
+     A trimmed mean across subjects (default: 20% per tail) is used as the final
+     ranking score, reducing the influence of outlier subjects.
+
+Outputs
+-------
+- A CSV ranking table with one row per model+run combination.
+- An optional bar plot of the top-N combinations, saved as PNG/PDF/SVG.
+
+Interpretation
+-------------
+The resulting ranking is a compact summary of decoding performance across
+preprocessing pipelines. It is useful for comparing run variants, but it does
+not replace the time-resolved decoding plots or significance analyses.
 """
 
 from __future__ import annotations
@@ -33,7 +70,24 @@ import seaborn as sns
 
 
 def _find_repo_root(start: Path) -> Path:
-    """Find repository root by walking upwards for pyproject.toml."""
+    """
+    Find the repository root by walking upward until ``pyproject.toml`` is found.
+
+    Parameters
+    ----------
+    start : pathlib.Path
+        Starting location, usually the directory containing this script.
+
+    Returns
+    -------
+    pathlib.Path
+        Path to the repository root.
+
+    Raises
+    ------
+    FileNotFoundError
+        If no parent directory contains a ``pyproject.toml`` file.
+    """
     for p in [start, *start.parents]:
         if (p / "pyproject.toml").exists():
             return p
@@ -43,6 +97,26 @@ def _find_repo_root(start: Path) -> Path:
 
 
 def _normalize_run_label(run_dir: Path) -> str:
+    """
+    Convert a derivatives folder name into a compact human-readable run label.
+
+    Examples
+    --------
+    - ``derivatives__no_ica`` -> ``no_ica``
+    - ``derivatives__0.1-100.0hz_notch50+100_no_ica`` ->
+      ``0.1-100.0hz_notch50+100_no_ica``
+
+    Parameters
+    ----------
+    run_dir : pathlib.Path
+        Path to a derivatives directory.
+
+    Returns
+    -------
+    str
+        Normalized label that is appended to the model name in the ranking
+        output.
+    """
     name = run_dir.name
     for prefix in ("derivatives__", "derivatives_", "derivatives"):
         if name.startswith(prefix):
@@ -52,6 +126,19 @@ def _normalize_run_label(run_dir: Path) -> str:
 
 
 def _find_run_result_dirs(data_root: Path) -> list[tuple[str, Path]]:
+    """
+    Discover all result directories containing decoding CSV files.
+
+    Parameters
+    ----------
+    data_root : pathlib.Path
+        Root directory containing ``derivatives*`` folders.
+
+    Returns
+    -------
+    list[tuple[str, pathlib.Path]]
+        A list of ``(run_label, results_dir)`` tuples.
+    """
     result = []
     for p in sorted(data_root.iterdir()):
         if not p.is_dir() or not p.name.startswith("derivatives"):
@@ -63,6 +150,25 @@ def _find_run_result_dirs(data_root: Path) -> list[tuple[str, Path]]:
 
 
 def _load_single_run(results_dir: Path) -> pd.DataFrame:
+    """
+    Load and collapse the decoding results for one preprocessing run.
+
+    The function concatenates all matching decoding CSVs, validates the
+    expected columns, converts accuracy values to percent if needed, and then
+    averages repeated measurements across folds/repetitions/player-status
+    effects to produce a subject-level time course.
+
+    Parameters
+    ----------
+    results_dir : pathlib.Path
+        Directory containing ``*_decoding_results.csv`` files.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Data frame with one row per ``subject × target × time_bin × model`` and
+        an ``accuracy`` column in percent.
+    """
     files = sorted(results_dir.glob("*_decoding_results.csv"))
     if not files:
         return pd.DataFrame()
@@ -90,6 +196,21 @@ def _load_single_run(results_dir: Path) -> pd.DataFrame:
 
 
 def _trimmed_mean(values: Iterable[float], proportion_to_cut: float) -> float:
+    """
+    Compute a robust trimmed mean after removing non-finite values.
+
+    Parameters
+    ----------
+    values : Iterable[float]
+        Sequence of numeric values to summarize.
+    proportion_to_cut : float
+        Fraction to remove from each tail before averaging.
+
+    Returns
+    -------
+    float
+        Trimmed mean, or ``NaN`` if no finite values are available.
+    """
     arr = np.asarray(list(values), dtype=float)
     arr = arr[np.isfinite(arr)]
     if arr.size == 0:
@@ -106,6 +227,29 @@ def rank_model_runs(
     trim_proportion: float = 0.20,
     exclude_targets: tuple[str, ...] = ("Outcome",),
 ) -> pd.DataFrame:
+    """
+    Rank model-run combinations across all preprocessing variants.
+
+    Parameters
+    ----------
+    data_root : pathlib.Path
+        Root directory containing the preprocessing runs.
+    out_csv : pathlib.Path
+        Output location for the ranking CSV.
+    chance_level : float, default=33.33
+        Chance-level decoding accuracy in percent.
+    trim_proportion : float, default=0.20
+        Fraction to cut from each tail when computing the trimmed mean across
+        subjects.
+    exclude_targets : tuple[str, ...], default=("Outcome",)
+        Targets that should be excluded from the ranking.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Ranking table sorted from best to worst according to the trimmed AOC
+        score.
+    """
     run_dirs = _find_run_result_dirs(data_root)
     if not run_dirs:
         raise FileNotFoundError(f"No run folders with results_decoding found under: {data_root}")
@@ -185,6 +329,26 @@ def plot_top_model_runs(
     top_n: int = 10,
     score_col: str = "score_trimmed_aoc",
 ) -> Path:
+    """
+    Plot the top-N ranked model-run combinations as a horizontal bar chart.
+
+    Parameters
+    ----------
+    ranking : pandas.DataFrame
+        Ranking table returned by :func:`rank_model_runs`.
+    out_path : pathlib.Path
+        Output path for the PNG figure. Matching PDF and SVG files are also
+        written.
+    top_n : int, default=10
+        Number of top rows to visualize.
+    score_col : str, default="score_trimmed_aoc"
+        Column used to order and plot the bars.
+
+    Returns
+    -------
+    pathlib.Path
+        Path to the saved PNG figure.
+    """
     if score_col not in ranking.columns:
         raise ValueError(f"Column not found for plotting: {score_col}")
 
@@ -260,6 +424,14 @@ def plot_top_model_runs(
 
 
 def parse_args() -> argparse.Namespace:
+    """
+    Parse command-line arguments for the ranking script.
+
+    Returns
+    -------
+    argparse.Namespace
+        Parsed CLI arguments.
+    """
     repo_root = _find_repo_root(Path(__file__).resolve())
 
     parser = argparse.ArgumentParser(
@@ -316,6 +488,18 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> int:
+    """
+    Command-line entry point.
+
+    The function runs the ranking analysis, optionally generates the top-N bar
+    plot, and prints a compact textual summary of the strongest model-run
+    combinations.
+
+    Returns
+    -------
+    int
+        Exit code for the process.
+    """
     args = parse_args()
 
     ranking = rank_model_runs(
