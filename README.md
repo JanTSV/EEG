@@ -169,3 +169,19 @@ Typical outputs are stored under:
 - MNE-Python: https://mne.tools/stable/index.html
 - Configuration files: `code/config_preprocessing.yaml` and
   `code/config_decoding.yaml`
+
+## Pipeline overview
+
+```mermaid
+flowchart TD
+    A[Local data/ folder with BIDS EEG files] --> B[01_preprocess.py]
+    B --> C[Preprocessed FIF epochs in data/]
+    C --> D[02_decoding.py]
+    D --> E[Decoding CSVs and Haufe patterns in results_decoding/]
+    E --> F[03_plot_decoding_results.py]
+    F --> G[Final figures in figures/]
+    E --> H[rank_model_runs.py]
+    H --> I[Model/run ranking CSV and top-N plots]
+    J[run_decoding_all_derivatives.sh] --> D
+    J --> F
+```
