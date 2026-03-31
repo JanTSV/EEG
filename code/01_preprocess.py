@@ -1,3 +1,26 @@
+"""
+Run the EEG preprocessing pipeline.
+
+This script converts the raw BioSemi recordings into analysis-ready epoched
+data. It follows the preprocessing choices used throughout the project and is
+written to be reproducible, configuration-driven, and easy to inspect.
+
+The pipeline performs the following main steps:
+
+- load the raw BDF recording for each subject,
+- select the relevant EEG channels,
+- map the BioSemi channel names to the standard 10-20 labels,
+- apply optional notch and band-pass filtering,
+- optionally run ICA-based artifact removal,
+- epoch the data around the configured events,
+- interpolate bad channels,
+- resample the epochs to the analysis sampling rate,
+- and save both the cleaned epochs and quality-control figures.
+
+The helper functions in this file intentionally mirror the MATLAB-inspired
+processing logic that was validated during debugging.
+"""
+
 import yaml
 import mne
 import numpy as np
@@ -10,8 +33,27 @@ from scipy.signal import resample_poly
 
 def interpolate_fieldtrip_style(epochs, bad_channels, n_neighbors=5):
     """
-    Replicates FieldTrip's 'weighted' neighbor interpolation (Inverse Distance Weighting).
-    Validated in Debug Step 3.
+    Interpolate bad channels using a FieldTrip-style inverse-distance scheme.
+
+    The function mimics the weighted nearest-neighbor interpolation that was
+    validated during debugging. For each bad channel, the ``n_neighbors``
+    closest good channels are found in sensor space and combined with inverse
+    distance weights.
+
+    Parameters
+    ----------
+    epochs : mne.Epochs
+        Epoched EEG data to repair.
+    bad_channels : list[str]
+        Channel names that should be interpolated.
+    n_neighbors : int, default=5
+        Number of nearest good channels used in the weighted average.
+
+    Returns
+    -------
+    mne.Epochs
+        A new epochs object with the bad channels replaced by interpolated
+        traces.
     """
     if not bad_channels:
         return epochs
@@ -64,8 +106,25 @@ def interpolate_fieldtrip_style(epochs, bad_channels, n_neighbors=5):
 
 def resample_polyphase(epochs, target_fs, pad='mean'):
     """
-    Replicates MATLAB's 'resample' (Signal Processing Toolbox).
-    Uses Polyphase Filter + Padding. Validated in Debug Step 2.
+    Resample epochs with a polyphase filter in a MATLAB-compatible manner.
+
+    The implementation mirrors MATLAB's ``resample`` behavior using
+    :func:`scipy.signal.resample_poly`. This was validated during debugging to
+    keep the final preprocessing output aligned with the reference pipeline.
+
+    Parameters
+    ----------
+    epochs : mne.Epochs
+        Epoched data to resample.
+    target_fs : float
+        Desired output sampling rate in Hz.
+    pad : str, default='mean'
+        Padding strategy forwarded to :func:`scipy.signal.resample_poly`.
+
+    Returns
+    -------
+    mne.Epochs
+        Resampled epochs object.
     """
     print(f"   -> Custom Resampling (Polyphase) to {target_fs}Hz")
     current_fs = epochs.info['sfreq']
@@ -92,7 +151,17 @@ def resample_polyphase(epochs, target_fs, pad='mean'):
 # --- MAIN PIPELINE CLASS ---
 
 class EEGPipeline:
+    """End-to-end preprocessing pipeline for one or more EEG subjects."""
+
     def __init__(self, config_path):
+        """
+        Load the preprocessing configuration and prepare output directories.
+
+        Parameters
+        ----------
+        config_path : str or pathlib.Path
+            Path to the YAML configuration file.
+        """
         with open(config_path, 'r') as f:
             self.cfg = yaml.safe_load(f)
         
@@ -107,12 +176,30 @@ class EEGPipeline:
         self._check_guardrails()
 
     def _check_guardrails(self):
-        """Ensures we don't accidentally run un-validated features."""
+        """
+        Read feature-flag style settings that protect unvalidated options.
+
+        At present this is mainly used to gate ICA.
+        """
         gr = self.cfg.get('guardrails', {})
         self.allow_ica = gr.get('allow_ica', False)
 
     def _save_spectrum_report(self, signal_obj, sub_str, stage_label=""):
-        """Save a PSD figure for frequency-domain QC (Raw or Epochs)."""
+        """
+        Save a frequency-domain quality-control figure.
+
+        The plot summarizes the spectrum after the main cleaning steps and can
+        be used to inspect whether the configured filters behaved as expected.
+
+        Parameters
+        ----------
+        signal_obj : mne.io.BaseRaw | mne.Epochs
+            Raw or epoched data object with ``compute_psd`` support.
+        sub_str : str
+            Subject identifier used in the output filename.
+        stage_label : str, default=""
+            Optional label appended to the figure title.
+        """
         params = self.cfg.get('params', {})
         spec_cfg = params.get('filter_spectrum_report', {})
 
@@ -177,7 +264,17 @@ class EEGPipeline:
         print(f"   Spectrum report saved: {spec_path}")
 
     def _apply_configurable_filters(self, raw):
-        """Apply optional notch + high/low-pass filters based on config."""
+        """
+        Apply the optional filtering stage configured in the YAML file.
+
+        This includes notch filtering for line noise and its harmonics as well
+        as optional high-pass and/or low-pass filtering.
+
+        Returns
+        -------
+        bool
+            ``True`` if at least one filter was applied, otherwise ``False``.
+        """
         params = self.cfg.get('params', {})
 
         highpass_hz = params.get('highpass_hz', None)
@@ -225,10 +322,23 @@ class EEGPipeline:
         return filters_applied
 
     def get_subjects(self):
+        """Return the list of subject IDs that should be processed."""
         return self.cfg['subjects']['include']
 
     def get_bad_channels(self, sub_id):
-        """Reads participants.tsv to find bad channels."""
+        """
+        Read the subject-specific bad-channel list from participants.tsv.
+
+        Parameters
+        ----------
+        sub_id : int
+            Numerical subject identifier.
+
+        Returns
+        -------
+        list[str]
+            Bad channel names, or an empty list if no entry is available.
+        """
         tsv_path = self.bids_root / "participants.tsv"
         df = pd.read_csv(tsv_path, sep='\t')
         
@@ -253,6 +363,13 @@ class EEGPipeline:
         return [ch.strip() for ch in str(bad_str).split(',')]
 
     def run_subject(self, sub_id):
+        """
+        Run the full preprocessing workflow for one subject.
+
+        The method handles raw loading, channel mapping, optional filtering,
+        ICA, epoching, interpolation, resampling, QC reporting, and final data
+        export.
+        """
         sub_str = f"sub-{sub_id:02d}"
         print(f"\n==========================================")
         print(f"PROCESSING: {sub_str}")
@@ -427,7 +544,13 @@ class EEGPipeline:
         epochs.save(out_fname, overwrite=True, verbose='error')
 
     def _generate_report(self, epochs, sub_str):
-        """Generates a simple QC plot (Butterfly + Image)."""
+        """
+        Generate a compact time-domain quality-control figure.
+
+        The report contains a butterfly plot, a global field power trace, and a
+        channel-by-time heatmap to provide a quick visual inspection of the
+        cleaned epochs.
+        """
         print("   Generating QC Report...")
         fig, ax = plt.subplots(2, 1, figsize=(10, 8))
         
@@ -463,6 +586,7 @@ class EEGPipeline:
         print(f"   Report saved: {plot_path}")
 
     def run(self):
+        """Process all configured subjects and continue past recoverable errors."""
         subs = self.get_subjects()
         for sub in subs:
             try:
@@ -473,8 +597,8 @@ class EEGPipeline:
                 continue
 
 if __name__ == "__main__":
-    # Config Path
-    config_file = "/home/miliczpl/MySSD/Code/EEG/code/config_preprocessing.yaml"
+    # Use a script-relative config path so the pipeline stays portable.
+    config_file = Path(__file__).resolve().parent / "config_preprocessing.yaml"
     
     pipeline = EEGPipeline(config_file)
     pipeline.run()
