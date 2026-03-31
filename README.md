@@ -177,6 +177,76 @@ Typical outputs are stored under:
 - `data/results_decoding/` — decoding CSV files and ranking outputs
 - `figures/` — final figures used in the report
 
+## Debugging & Validation
+
+The `debug/` folder contains a comprehensive validation framework for verifying the MATLAB-to-Python pipeline port. Since this is a complex translation of signal processing and machine learning code across two fundamentally different environments, the intermediate results **are not trivially reproducible** and require manual inspection.
+
+### Overview
+
+The debugging process is structured into two phases:
+
+- **Preprocessing Validation** (Steps 1–3): MATLAB (FieldTrip) → Python (MNE/Scipy)
+  - Data loading and epoching
+  - Resampling (2048 Hz → 256 Hz)  
+  - Channel interpolation
+
+- **Decoding Validation** (Steps 4–5): MATLAB (CoSMoMVPA) → Python (Scikit-Learn)
+  - Feature engineering (time-binning into epochs)
+  - LDA classifier identity verification
+
+### Key Reports
+
+- **`PREPROCESSING_DEBUG_REPORT.md`** — Detailed numerical validation of the preprocessing pipeline, including step-by-step comparisons, error tolerance thresholds, and discovered implementation differences between FieldTrip and MNE.
+
+- **`DECODING_DEBUG_REPORT.md`** — Step-by-step validation of the feature-extraction and decoding phases, including a three-phase strategy (deterministic feature engineering, stochastic decoding, and exact classifier matching).
+
+### Debug Scripts
+
+Each step is accompanied by a dedicated validation script:
+
+- `debug_step1.py` — Compares raw data loading and epoching (all channels)
+- `debug_step2.py` — Validates FFT-based resampling against MATLAB output
+- `debug_step3_interp.py` — Tests channel interpolation with standard 10-20 label mapping
+- `debug_step3_eigeneInterp.py` — Validates interpolation using exact FieldTrip neighbor sets
+- `debug_step4_features.py` — Verifies time-binning and feature extraction
+- `debug_step5_decoding.py` — Tests LDA decoding with CoSMoMVPA-style trial averaging
+- `debug_step5_decoding_exactMatch.py` — Confirms classifier equivalence by feeding MATLAB super-trials into Python LDA
+
+### Important: Manual Validation Required
+
+**The validation process is not automatically reproducible** because:
+
+1. **Intermediate MATLAB Results** — Each debug script expects `.mat` files containing intermediate results exported directly from the original MATLAB preprocessing and decoding code (stored in `originalCode/`). These files are **not generated automatically** and must be manually produced by running the corresponding MATLAB scripts and exporting the data.
+
+2. **Ground-Truth Comparison** — To validate a new EEG preprocessing variant or decoding configuration, you must:
+   - Run the MATLAB pipeline on the same raw data
+   - Export intermediate matrices after each step (epoched data, resampled data, interpolated data, features, and decoding results)
+   - Place the exported `.mat` files in the `originalCode/` directory
+   - Run the corresponding Python debug script
+   - Compare the outputs visually and numerically using the generated plots and console summaries
+
+3. **Signal Processing Differences** — Even with identical inputs, some operations naturally produce different results due to algorithmic differences:
+   - **Resampling:** MNE uses FFT-based resampling; FieldTrip uses polyphase filtering
+   - **Interpolation:** MNE uses spherical spline interpolation; FieldTrip uses weighted neighbor averaging
+   - **Classifier Details:** Small differences in LDA implementation details (e.g., shrinkage estimators) can produce slightly different cross-validation results
+
+See the individual debug reports for detailed error tolerance thresholds and interpretation guidance.
+
+### Folder Structure
+```text
+debug/
+├── PREPROCESSING_DEBUG_REPORT.md          # Full preprocessing validation report
+├── DECODING_DEBUG_REPORT.md               # Full decoding validation report
+├── debug_step1.py                         # Data loading & epoching
+├── debug_step2.py                         # Resampling validation
+├── debug_step3_interp.py                  # Channel interpolation (10-20 mapped)
+├── debug_step3_eigeneInterp.py            # Interpolation (exact neighbors)
+├── debug_step4_features.py                # Feature extraction & binning
+├── debug_step5_decoding.py                # LDA decoding with averaging
+├── debug_step5_decoding_exactMatch.py     # Classifier identity test
+```
+
+
 ## Troubleshooting
 
 - If the scripts cannot find the input data, make sure the local `data/`
@@ -207,3 +277,4 @@ flowchart TD
     J[run_decoding_all_derivatives.sh] --> D
     J --> F
 ```
+
