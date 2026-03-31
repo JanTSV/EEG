@@ -59,7 +59,10 @@ restore_config() {
 }
 trap restore_config EXIT
 
-mapfile -t DERIV_DIRS < <(
+DERIV_DIRS=()
+while IFS= read -r deriv_dir; do
+  DERIV_DIRS+=("${deriv_dir}")
+done < <(
   find "${DATA_ROOT}" -mindepth 1 -maxdepth 1 -type d \( -name "derivative*" -o -name "derivatives*" \) | sort
 )
 

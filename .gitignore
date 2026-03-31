@@ -5,6 +5,8 @@ data/derivatives
 data/
 tmp/
 
+.DS_Store
+
 #backup results
 *backup*/
 # Byte-compiled / optimized / DLL files
