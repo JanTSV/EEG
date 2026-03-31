@@ -6,8 +6,8 @@
 paths:
   bids_root: "/home/miliczpl/MySSD/Code/EEG/data"
   deriv_root: "/home/miliczpl/MySSD/Code/EEG/data/derivatives__0.1-100.0hz_notch50+100_no_ica"
-  results_dir: "/home/miliczpl/MySSD/Code/EEG/data/derivatives__0.1-100.0hz_notch50+100_no_ica/results_decoding_mlp_2"
-  figures_dir: "/home/miliczpl/MySSD/Code/EEG/data/derivatives__0.1-100.0hz_notch50+100_no_ica/figures_decoding_mlp_2"
+  results_dir: "/home/miliczpl/MySSD/Code/EEG/data/derivatives__0.1-100.0hz_notch50+100_no_ica/results_decoding"
+  figures_dir: "/home/miliczpl/MySSD/Code/EEG/data/derivatives__0.1-100.0hz_notch50+100_no_ica/figures_decoding"
 
 subjects:
   # Liste aller validen Subjects (Bad subjects 10, 23, 24 ausgeschlossen)
