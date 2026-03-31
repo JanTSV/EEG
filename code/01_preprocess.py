@@ -6,7 +6,7 @@ import matplotlib.pyplot as plt
 from pathlib import Path
 from scipy.signal import resample_poly
 
-# --- HELPER FUNCTIONS (Validated Logic) ---
+# --- HELPER FUNCTIONS ---
 
 def interpolate_fieldtrip_style(epochs, bad_channels, n_neighbors=5):
     """
@@ -80,10 +80,8 @@ def resample_polyphase(epochs, target_fs, pad='mean'):
     # Create new Info object
     info = epochs.info.copy()
     
-    # --- FIX: Unlock Info to change sfreq manually ---
     with info._unlock():
         info['sfreq'] = target_fs
-    # -------------------------------------------------
     
     # Re-create Epochs
     # Note: tmin/tmax might need slight adjustment due to rounding, but for MNE array import ok
@@ -244,7 +242,6 @@ class EEGPipeline:
         # Assuming Player 1 is columns 6/7 (index 5/6) or named explicitly
         try:
             # Fallback: Index (wie MATLAB) -> Column 6 (0-based index 5)
-            # Adjust if necessary based on your TSV structure
             bad_str = row.iloc[0, 5] 
         except Exception as e:
             print(f"   WARNING: Could not read bad channels for {sub_str}: {e}")
@@ -278,9 +275,7 @@ class EEGPipeline:
         # This matches MATLAB logic
         picks = [ch for ch in raw.ch_names if ('2-A' in ch) or ('2-B' in ch)]
         
-        # --- FIX: Use .pick() instead of legacy pick_channels() ---
         raw.pick(picks)
-        # ----------------------------------------------------------
         
         # 3. MAPPING & MONTAGE (Critical Fix)
         print("   Applying Channel Mapping (BioSemi -> 10-20)...")
@@ -304,7 +299,6 @@ class EEGPipeline:
         # 5. ICA
         if self.allow_ica:
             # Average reference (required for ICA)
-            # TODO: Maybe not copy again
             raw_copy = raw.copy()
             raw_copy.set_eeg_reference("average", projection=False)
 
