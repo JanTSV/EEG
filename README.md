@@ -20,18 +20,18 @@ folder at the project root.
 
 ## Getting the data
 
-The easiest way to match the expected structure is to install the OpenNeuro
-dataset into the project root and use data/ as the local dataset directory.
-This keeps the BIDS layout identical to what the scripts expect while letting
-DataLad fetch files on demand.
+The easiest way to match the expected structure is to clone the OpenNeuro
+dataset directly into the project root as `data/`. This keeps the BIDS layout
+identical to what the scripts expect while letting DataLad fetch files on
+demand.
 
 Example:
 
 ```bash
 # from the repository root
-datalad install -d data https://github.com/OpenNeuroDatasets/ds006761
+datalad clone https://github.com/OpenNeuroDatasets/ds006761 data
 cd data
-datalad get .
+datalad get -r .
 ```
 
 If you already have the dataset elsewhere, you can also copy or symlink it into
