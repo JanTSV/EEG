@@ -3,7 +3,10 @@ data/example_data
 data/sub-31
 data/derivatives
 data/
+tmp/
 
+#backup results
+*backup*/
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]

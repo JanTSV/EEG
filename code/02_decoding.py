@@ -1,3 +1,28 @@
+"""
+Run the EEG decoding analysis.
+
+This script takes the preprocessed epochs created by the preprocessing
+pipeline, transforms them into the feature representation used for decoding,
+and evaluates several classification models in a repeated cross-validation
+scheme. The output consists of per-subject decoding CSV files and, for linear
+models, Haufe-pattern CSV files that can be used for interpretability figures.
+
+The workflow is fully driven by the YAML configuration file:
+
+- preprocessing windows and binning are controlled by ``config_decoding.yaml``,
+- model inclusion and hyperparameters are selected from the same file,
+- and subject inclusion/exclusion is read from the configuration as well.
+
+The implementation keeps the core decoding logic compact and reproducible:
+
+- trials are converted from volts to microvolts,
+- common-average referencing is applied,
+- block starts are removed,
+- feature windows are averaged into fixed-width time bins,
+- class-balanced super-trials are created,
+- and repeated stratified cross-validation is run for each enabled model.
+"""
+
 import yaml
 import mne
 import numpy as np
@@ -8,106 +33,27 @@ from pathlib import Path
 from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
 from sklearn.svm import SVC
 from sklearn.linear_model import LogisticRegression, RidgeClassifier
+from sklearn.neural_network import MLPClassifier
 from sklearn.model_selection import StratifiedKFold
 from sklearn.preprocessing import StandardScaler
 from sklearn.pipeline import make_pipeline
 from sklearn.metrics import accuracy_score
-from sklearn.base import BaseEstimator, ClassifierMixin
 from sklearn.base import clone
 from joblib import Parallel, delayed
-from mne.decoding import SlidingEstimator
-
-# PyTorch Imports
-import torch
-import torch.nn as nn
-import torch.optim as optim
-
-# =============================================================================
-# PyTorch Estimator (Simple MLP to compare with linear models)
-# =============================================================================
-class TorchMLP(nn.Module):
-    def __init__(self, input_dim, hidden_dim, n_classes):
-        super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(input_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Dropout(0.2),
-            nn.Linear(hidden_dim, n_classes)
-        )
-    def forward(self, x):
-        # Flatten if input is 3D
-        if x.dim() > 2:
-            x = x.view(x.size(0), -1)
-        return self.net(x)
-
-class PyTorchEstimator(BaseEstimator, ClassifierMixin):
-    def __init__(self, hidden_dim=64, lr=0.001, epochs=50, batch_size=32):
-        self.hidden_dim = hidden_dim
-        self.lr = lr
-        self.epochs = epochs
-        self.batch_size = batch_size
-        self.model_ = None
-        self.classes_ = None
-        self.label_map_ = None
-
-    def fit(self, X, y):
-        self.classes_ = np.unique(y)
-        n_classes = len(self.classes_)
-        
-        X_t = torch.FloatTensor(X)
-        
-        # Map labels to 0-indexed for PyTorch CrossEntropyLoss
-        self.label_map_ = {val: idx for idx, val in enumerate(self.classes_)}
-        y_mapped = np.array([self.label_map_[val] for val in y])
-        y_t = torch.LongTensor(y_mapped)
-        
-        channels = X.shape[1]
-        samples = X.shape[2] if len(X.shape) > 2 else 1
-        input_dim = channels * samples
-        
-        self.model_ = TorchMLP(input_dim, self.hidden_dim, n_classes)
-            
-        optimizer = optim.Adam(self.model_.parameters(), lr=self.lr)
-        criterion = nn.CrossEntropyLoss()
-        
-        dataset = torch.utils.data.TensorDataset(X_t, y_t)
-        loader = torch.utils.data.DataLoader(dataset, batch_size=self.batch_size, shuffle=True)
-        
-        self.model_.train()
-        for _ in range(self.epochs):
-            for xb, yb in loader:
-                optimizer.zero_grad()
-                outputs = self.model_(xb)
-                loss = criterion(outputs, yb)
-                loss.backward()
-                optimizer.step()
-        return self
-
-    def predict(self, X):
-        self.model_.eval()
-        with torch.no_grad():
-            X_t = torch.FloatTensor(X)
-            outputs = self.model_(X_t)
-            _, predicted_mapped = torch.max(outputs.data, 1)
-        
-        # Map back to original labels
-        predicted_mapped = predicted_mapped.numpy()
-        reverse_map = {idx: val for val, idx in self.label_map_.items()}
-        return np.array([reverse_map[idx] for idx in predicted_mapped])
-
-    def score(self, X, y):
-        preds = self.predict(X)
-        return np.mean(preds == y)
 
 # =============================================================================
 # CLASS: Feature Extractor (Unchanged logic, cleaner implementation)
 # =============================================================================
 class FeatureExtractor:
+    """Convert preprocessed epochs into the binned feature representation used for decoding."""
+
     def __init__(self, config):
+        """Store the decoding configuration and set the expected sampling rate."""
         self.cfg = config['params']
         self.fs = 256 
 
     def _get_bins(self, data, start_offset_s, n_bins):
+        """Average a continuous epoch segment into a fixed number of time bins."""
         zero_idx = int(-start_offset_s * self.fs)
         bin_samples = int(self.cfg['bin_width'] * self.fs)
         binned_data = []
@@ -120,6 +66,20 @@ class FeatureExtractor:
         return np.stack(binned_data, axis=2)
 
     def transform(self, epochs):
+        """
+        Apply the complete feature-extraction pipeline to a set of epochs.
+
+        The transformation performs unit conversion, common-average reference,
+        removal of block-start trials, baseline correction, and bin-wise
+        averaging across the configured analysis windows.
+
+        Returns
+        -------
+        X : ndarray
+            Feature tensor with shape ``(n_trials, n_channels, n_bins)``.
+        keep_indices : list[int]
+            Indices of trials retained after block-start removal.
+        """
         # 1. Scale to uV
         data_uv = epochs.get_data() * 1e6
         times = epochs.times
@@ -161,12 +121,21 @@ class FeatureExtractor:
 # CLASS: Target Manager (Handles Prev Trials & Winner Status)
 # =============================================================================
 class TargetManager:
+    """Create the target vectors used by the decoding analysis."""
+
     def __init__(self, events_df, config):
+        """Store the events table and the decoding configuration."""
         self.events = events_df
         self.cfg = config
         
     def get_winner_status(self):
-        """Determines if current player (P1) is Winner or Loser."""
+        """
+        Determine whether the current participant is a Winner, Loser, or Draw.
+
+        The status is derived from the outcome column in the events table and
+        is later attached to the decoding output for the winner-vs-loser
+        figures.
+        """
         outcomes = self.events.iloc[:, 8].values
         p1_wins = np.sum(outcomes == 2)
         p2_wins = np.sum(outcomes == 3)
@@ -176,7 +145,21 @@ class TargetManager:
         else: return "Draw"
 
     def get_target(self, target_cfg, keep_indices):
-        """Returns y vector for specific target config."""
+        """
+        Return the target labels for one configured decoding target.
+
+        Parameters
+        ----------
+        target_cfg : dict
+            Target specification from the YAML configuration.
+        keep_indices : array-like
+            Trial indices retained by :class:`FeatureExtractor`.
+
+        Returns
+        -------
+        ndarray
+            Label vector aligned with the retained feature trials.
+        """
         if 'source' in target_cfg:
             src_name = target_cfg['source']
             src_cfg = next(t for t in self.cfg['targets'] if t['name'] == src_name)
@@ -199,7 +182,10 @@ class TargetManager:
 # CLASS: Decoder (With Safety Checks & Multi-Model Support)
 # =============================================================================
 class Decoder:
+    """Train and evaluate all enabled decoding models for one subject."""
+
     def __init__(self, config):
+        """Build the model pipelines and store the repeated-CV settings."""
         self.n_repeats = config['params']['n_repeats']
         self.n_avg = config['params']['n_super_trials']
         self.n_folds = config['params']['n_folds']
@@ -207,11 +193,9 @@ class Decoder:
         self.models_cfg = config.get('models', {'lda': {'enabled': True}})
         
         self.pipelines = {}
-        self.sliding_window_flags = {}
         
         if self.models_cfg.get('lda', {}).get('enabled', False):
             self.pipelines['lda'] = make_pipeline(StandardScaler(), LinearDiscriminantAnalysis(solver='lsqr', shrinkage='auto'))
-            self.sliding_window_flags['lda'] = self.models_cfg.get('lda', {}).get('use_sliding_window', False)
             
         if self.models_cfg.get('svm', {}).get('enabled', False):
             m_cfg = self.models_cfg['svm']
@@ -219,35 +203,37 @@ class Decoder:
             self.pipelines['svm'] = make_pipeline(StandardScaler(), SVC(C=m_cfg.get('C', 1.0), kernel=svm_kernel))
             if svm_kernel != 'linear':
                 print(f"[WARN] SVM kernel='{svm_kernel}' has no coef_; Haufe patterns will not be computed for model 'svm'.")
-            self.sliding_window_flags['svm'] = m_cfg.get('use_sliding_window', False)
             
         if self.models_cfg.get('logreg', {}).get('enabled', False):
             m_cfg = self.models_cfg['logreg']
             self.pipelines['logreg'] = make_pipeline(StandardScaler(), LogisticRegression(C=m_cfg.get('C', 1.0), solver='lbfgs', max_iter=1000))
-            self.sliding_window_flags['logreg'] = m_cfg.get('use_sliding_window', False)
 
         if self.models_cfg.get('ridge', {}).get('enabled', False):
             m_cfg = self.models_cfg['ridge']
             self.pipelines['ridge'] = make_pipeline(StandardScaler(), RidgeClassifier(alpha=m_cfg.get('alpha', 1.0)))
-            self.sliding_window_flags['ridge'] = m_cfg.get('use_sliding_window', False)
 
-        if self.models_cfg.get('torch_mlp', {}).get('enabled', False):
-            m_cfg = self.models_cfg['torch_mlp']
-            self.pipelines['torch_mlp'] = make_pipeline(StandardScaler(), PyTorchEstimator(
-                hidden_dim=m_cfg.get('hidden_dim', 64), 
-                epochs=m_cfg.get('epochs', 50), 
-                lr=m_cfg.get('learning_rate', 0.001),
-                batch_size=m_cfg.get('batch_size', 32)
-            ))
-            self.sliding_window_flags['torch_mlp'] = m_cfg.get('use_sliding_window', True)
+        if self.models_cfg.get('mlp', {}).get('enabled', False):
+            m_cfg = self.models_cfg['mlp']
+            self.pipelines['mlp'] = make_pipeline(
+                StandardScaler(),
+                MLPClassifier(
+                    hidden_layer_sizes=tuple(m_cfg.get('hidden_layer_sizes', [64, 32])),
+                    max_iter=m_cfg.get('max_iter', 1000),
+                    random_state=0,
+                ),
+            )
 
         if not self.pipelines:
             print("[WARN] No models enabled in config! Defaulting to LDA.")
             self.pipelines['lda'] = make_pipeline(StandardScaler(), LinearDiscriminantAnalysis(solver='lsqr', shrinkage='auto'))
-            self.sliding_window_flags['lda'] = False
 
     def _extract_haufe_patterns(self, fitted_estimator, X_train):
-        """Compute Haufe activation patterns for fitted linear estimators.
+        """
+        Compute Haufe activation patterns for fitted linear estimators.
+
+        The patterns are returned only when the estimator exposes a linear
+        coefficient vector. Nonlinear models such as the MLP do not contribute
+        Haufe patterns.
 
         Returns
         -------
@@ -313,6 +299,12 @@ class Decoder:
         return patterns, row_labels
 
     def _create_super_trials(self, X, y, seed):
+        """
+        Create class-balanced super-trials by averaging ``n_super_trials`` trials.
+
+        Super-trials reduce noise and keep the class balance controlled for the
+        repeated stratified cross-validation procedure.
+        """
         rng = np.random.RandomState(seed)
         classes = np.unique(y)
         X_new, y_new = [], []
@@ -331,8 +323,31 @@ class Decoder:
         return np.array(X_new), np.array(y_new)
 
     def _run_single_repeat(self, r, X_clean, y_clean, clf, model_name, n_bins, ch_names):
-        import torch
-        torch.set_num_threads(1)
+        """
+        Run one repeated-CV decoding pass for a single model.
+
+        Parameters
+        ----------
+        r : int
+            Repeat index used for the random super-trial split and CV seed.
+        X_clean : ndarray
+            Cleaned feature tensor after trial filtering.
+        y_clean : ndarray
+            Target labels aligned with ``X_clean``.
+        clf : sklearn estimator
+            Base classifier pipeline.
+        model_name : str
+            Name used in the output tables.
+        n_bins : int
+            Number of time bins in the feature tensor.
+        ch_names : list[str]
+            Channel names used for Haufe-pattern export.
+
+        Returns
+        -------
+        tuple[list[dict], list[dict]]
+            Decoding accuracy rows and Haufe-pattern rows.
+        """
         results = []
         patterns = []
         X_avg, y_avg = self._create_super_trials(X_clean, y_clean, seed=r)
@@ -344,28 +359,18 @@ class Decoder:
             return results, patterns
         
         cv = StratifiedKFold(n_splits=self.n_folds, shuffle=True, random_state=r)
-        use_sliding_window = self.sliding_window_flags.get(model_name, False)
-        
-        if use_sliding_window:
-            slider = SlidingEstimator(clone(clf), scoring='accuracy', n_jobs=1, verbose=False)
-            for f_idx, (train, test) in enumerate(cv.split(X_avg[:, 0, 0], y_avg)):
-                slider.fit(X_avg[train], y_avg[train])
-                scores = slider.score(X_avg[test], y_avg[test])
-                
-                for b, acc in enumerate(scores):
-                    results.append({
-                        'model': model_name,
-                        'repeat': r,
-                        'fold': f_idx,
-                        'time_bin': b,
-                        'accuracy': acc
-                    })
+        for b in range(n_bins):
+            X_bin = X_avg[:, :, b]
+            fold_accs = []
+            
+            for f_idx, (train, test) in enumerate(cv.split(X_bin, y_avg)):
+                my_clf = clone(clf)
+                my_clf.fit(X_bin[train], y_avg[train])
+                pred = my_clf.predict(X_bin[test])
+                fold_accs.append(accuracy_score(y_avg[test], pred))
 
-                # Haufe patterns per time-bin estimator (linear models only)
-                for b, est_b in enumerate(slider.estimators_):
-                    patt, row_labels = self._extract_haufe_patterns(est_b, X_avg[train, :, b])
-                    if patt is None:
-                        continue
+                patt, row_labels = self._extract_haufe_patterns(my_clf, X_bin[train])
+                if patt is not None:
                     for row_idx in range(patt.shape[0]):
                         for ch_idx, ch_name in enumerate(ch_names):
                             patterns.append({
@@ -379,44 +384,32 @@ class Decoder:
                                 'channel': ch_name,
                                 'pattern_value': float(patt[row_idx, ch_idx])
                             })
-        else:
-            for b in range(n_bins):
-                X_bin = X_avg[:, :, b]
-                fold_accs = []
-                
-                for f_idx, (train, test) in enumerate(cv.split(X_bin, y_avg)):
-                    my_clf = clone(clf)
-                    my_clf.fit(X_bin[train], y_avg[train])
-                    pred = my_clf.predict(X_bin[test])
-                    fold_accs.append(accuracy_score(y_avg[test], pred))
-
-                    patt, row_labels = self._extract_haufe_patterns(my_clf, X_bin[train])
-                    if patt is not None:
-                        for row_idx in range(patt.shape[0]):
-                            for ch_idx, ch_name in enumerate(ch_names):
-                                patterns.append({
-                                    'model': model_name,
-                                    'repeat': r,
-                                    'fold': f_idx,
-                                    'time_bin': b,
-                                    'pattern_row': row_idx,
-                                    'pattern_label': row_labels[row_idx],
-                                    'channel_idx': ch_idx,
-                                    'channel': ch_name,
-                                    'pattern_value': float(patt[row_idx, ch_idx])
-                                })
-                
-                for f_idx, acc in enumerate(fold_accs):
-                    results.append({
-                        'model': model_name,
-                        'repeat': r,
-                        'fold': f_idx,
-                        'time_bin': b,
-                        'accuracy': acc
-                    })
+            
+            for f_idx, acc in enumerate(fold_accs):
+                results.append({
+                    'model': model_name,
+                    'repeat': r,
+                    'fold': f_idx,
+                    'time_bin': b,
+                    'accuracy': acc
+                })
         return results, patterns
 
     def run(self, X, y, ch_names):
+        """
+        Execute the full decoding workflow for one target and one subject.
+
+        This method filters invalid labels, checks that enough trials are
+        available, runs every enabled model for the configured number of
+        repeats, and returns both the decoding results and the optional Haufe
+        patterns.
+
+        Returns
+        -------
+        tuple[pandas.DataFrame | None, pandas.DataFrame | None]
+            Decoding results and Haufe-pattern tables, or ``None`` if decoding
+            could not be performed.
+        """
         # --- 1. DATA CLEANING (The Fix) ---
         invalid_mask = np.isin(y, self.clean_cfg['drop_values']) | np.isnan(y)
         valid_mask = ~invalid_mask
@@ -459,6 +452,13 @@ class Decoder:
 # MAIN
 # =============================================================================
 def run_pipeline():
+    """
+    Run the decoding analysis for all configured subjects and targets.
+
+    The pipeline loads the preprocessed epochs, builds features, extracts the
+    relevant target labels, runs the configured decoders, and writes one CSV
+    per subject for the decoding results and Haufe patterns.
+    """
     with open("code/config_decoding.yaml", 'r') as f: cfg = yaml.safe_load(f)
     
     deriv_root = Path(cfg['paths']['deriv_root'])

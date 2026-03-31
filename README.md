@@ -1,216 +1,209 @@
-# EEG Preprocessing Pipeline
+# EEG decoding project
 
-Dual-player EEG preprocessing for Rock-Paper-Scissors task data. Processes BioSemi 64-channel recordings through a configurable pipeline including filtering, ICA artifact removal, epoching, and downsampling.
+This repository contains the full EEG pipeline for the Rock-Paper-Scissors
+project:
 
-## Prerequisites
+- preprocessing of the raw BioSemi recordings,
+- time-resolved decoding with multiple classifiers,
+- figure generation for the final report,
+- and a helper script that ranks model/run combinations.
+
+The code is meant to be run directly from the scripts in the `code/` folder.
+A shell script is included to run multiple decoding and plotting tasks in one
+go.
+
+## Important
+
+The repository does not ship the EEG data itself.
+For the pipeline to work, you must place the BIDS input files in a local data/
+folder at the project root.
+
+## Getting the data
+
+The easiest way to match the expected structure is to clone the OpenNeuro
+dataset directly into the project root as `data/`. This keeps the BIDS layout
+identical to what the scripts expect while letting DataLad fetch files on
+demand.
+
+Example:
+
+```bash
+# from the repository root
+datalad clone https://github.com/OpenNeuroDatasets/ds006761 data
+cd data
+datalad get -r .
+```
+
+If you already have the dataset elsewhere, you can also copy or symlink it into
+data/ as long as the BIDS structure remains the same.
+
+## Requirements
 
 - Python 3.11+
-- [uv](https://github.com/astral-sh/uv) (recommended) or pip
-- BioSemi 64-channel EEG data in BIDS format
+- [uv](https://github.com/astral-sh/uv) recommended, or pip
+- Local EEG dataset in the expected BIDS layout inside `data/`
+- OpenNeuro dataset ds006761 installed into `data/` or provided with the same
+  BIDS structure
 
-## Quick Start
+## Main scripts
+
+- `code/01_preprocess.py` — preprocessing of the raw BDF recordings
+- `code/02_decoding.py` — decoding analysis for all configured targets
+- `code/03_plot_decoding_results.py` — decoding figures and Haufe plots
+- `code/additional_analysis/rank_model_runs.py` — ranking of model/run setups
+
+## Script arguments
+
+The preprocessing, decoding, and plotting scripts are intended to be run
+directly. Their behavior is controlled through the YAML configuration files in
+`code/`, so they do not currently take extra command-line arguments.
+
+The ranking helper does expose a small CLI for convenience:
+
+- `--data-root` — root directory containing the `derivatives*` folders
+- `--out` — output CSV path for the ranking table
+- `--chance-level` — chance level in percent
+- `--trim-proportion` — fraction trimmed from each tail across subjects
+- `--exclude-targets` — targets to ignore when ranking
+- `--top-n` — number of top rows to plot, or `all`
+- `--plot-out` — output path for the top-N bar plot
+- `--no-plot` — disable plot generation
+
+## Quick start
 
 ```bash
 # Install dependencies
 uv sync
 
-# Run preprocessing pipeline (processes pairs defined in config)
-uv run python code/preprocessing.py
+# Run preprocessing directly
+uv run python code/01_preprocess.py
+
+# Run decoding directly
+uv run python code/02_decoding.py
+
+# Create decoding figures directly
+uv run python code/03_plot_decoding_results.py
+
+# Rank all model/run combinations directly
+uv run code/additional_analysis/rank_model_runs.py --top-n all
 ```
 
-Output: Preprocessed epochs saved as FIF files in `data/derivatives/`
+## Batch execution
 
-## Configuration
+The shell script is meant for running multiple decoding and plotting tasks in a
+single pass, for example when comparing several preprocessing variants or when
+recreating the final report figures.
 
-All preprocessing parameters are in **`code/preprocess_config.yaml`** (fully commented). Key sections:
+Available arguments:
 
-### Paths
-
-- `raw_template`: BioSemi BDF files (dual-player recordings)
-- `events_template`: Event markers (stimulus onset times)
-- `derivatives_dir`: Output location for preprocessed epochs
-
-### Processing Steps (Enable/Disable as Needed)
-
-**Filtering:**
-
-- `notch_filter_enabled`: Remove 50/60 Hz AC mains hum (default: `true`, 50 Hz)
-- `output_filter_enabled`: Band-pass filter (default: 0.1-100 Hz, FIR)
-
-**Artifact Removal:**
-
-- `reref_to_average`: Average re-reference (default: `true`)
-- `ica_enabled`: Independent Component Analysis for eye/muscle artifacts (default: `false`)
-- `amplitude_reject_enabled`: Reject epochs by voltage threshold (default: `false`)
-
-**Data Processing:**
-
-- `baseline_window_sec`: Baseline correction window (default: -0.2 to 0 sec)
-- `down_sample`: Resample to 256 Hz (default: `true`, reduces file size 8×)
-- `interpolate_bad_channels`: Interpolate noisy channels via spherical spline
-
-### Target Data
-
-- `target_pairs`: Which pair IDs to process (e.g., `[01]` for testing, `[1, 2, 3, ...]` for all)
-- `pair_ranges`: Available pairs (some subjects missing: pairs 10, 23-24 excluded)
-
-## Preprocessing Pipeline Overview
-
-The pipeline (`code/preprocessing.py`) executes these steps per player:
-
-1. **Channel Selection** – Extract player-specific channels from dual-player recording
-2. **Montage Standardization** – Map to BioSemi64 standard positions
-3. **Re-referencing** – Average reference (subtracts mean across channels)
-4. **Filtering** – Notch (line noise) + band-pass (signal of interest)
-5. **ICA** – Separate brain from physiological artifacts (optional)
-6. **Epoching** – Extract [-0.2, 5.0] sec windows around stimulus onset
-7. **Baseline Correction** – Subtract pre-stimulus mean (-0.2 to 0 sec)
-8. **Bad Channel Interpolation** – Restore noisy channels via spline
-9. **Amplitude Rejection** – Flag outlier epochs (optional)
-10. **Downsampling** – 2048 Hz → 256 Hz (optional)
-11. **Save** – Output as FIF format with metadata
-
-See inline comments in `preprocessing.py` for detailed method explanations.
-
-## Output Format
-
-**FIF (Functional Image File Format):**
-
-- MNE-native binary format
-- Preserves metadata: channel info, montage, sampling rate, coordinate frames
-- Filename: `pair-{pair:02d}_player-{player}_task-RPS_eeg-epo.fif`
-
-**Load preprocessed data:**
-
-```python
-import mne
-epochs = mne.read_epochs('data/derivatives/pair-01_player-1_task-RPS_eeg-epo.fif')
-```
-
-## Typical Workflow
-
-1. **Initial test:** Set `target_pairs: [01]` in config → run pipeline on one pair
-2. **Inspect output:** Check `data/derivatives/` for FIF files
-3. **Compare results:** Use comparison script to visualize preprocessing effects
-4. **Adjust parameters:** Enable ICA (`ica_enabled: true`) or change filter bounds
-5. **Process all data:** Set `target_pairs` to full list or use `pair_ranges`
-
-## Visualizing Preprocessing Effects
-
-Compare raw vs. preprocessed data to see the impact of filtering, ICA, and other processing steps:
+- `--figures-only` — regenerate only the figures for all derivative folders
+  without re-running decoding
+- `--override` — force a full re-run and overwrite existing `results_decoding`
+  and figure outputs
+- `-h`, `--help` — show the built-in usage help
 
 ```bash
-# Compare pair 1, player 1 (requires preprocessed FIF file to exist)
-uv run python code/compare_preprocessing.py --pair 1 --player 1
-
-# Compare with specific channels
-uv run python code/compare_preprocessing.py --pair 1 --player 1 --channels Fz Cz Pz
+bash run_decoding_all_derivatives.sh
+bash run_decoding_all_derivatives.sh --figures-only
+bash run_decoding_all_derivatives.sh --override
 ```
 
-**What it shows:**
+## Preprocessing
 
-- Top plot: Raw data (epoched + downsampled only)
-- Bottom plot: Preprocessed data (filtered, ICA, re-referenced, baseline corrected)
-- Butterfly plots: All channels overlaid to see global patterns
-- RMS amplitude reduction: Quantifies noise removal
+The preprocessing pipeline loads raw BioSemi BDF recordings, applies the
+configured filtering and artifact-rejection steps, interpolates bad channels,
+epochs the data, resamples it, and writes FIF files plus quality-control
+figures.
 
-Use this to validate that preprocessing improves signal quality without distorting neural responses.
+Key points:
 
-## ERP Visualization
+- the configuration lives in `code/config_preprocessing.yaml`,
+- channel mapping and filtering are configuration-driven,
+- ICA is optional and controlled by the config,
+- the config path is relative, so the script can be run from the repository
+  root.
 
-Generate publication-ready ERP plots (Joint Plots and ROI Traces) based on the preprocessed data.
+Output example:
 
-```bash
-# Run plotting pipeline
-uv run code/plot_results.py
-```
+- `data/sub-01/sub-01_task-RPS_desc-preproc_eeg.fif`
+- `data/report/sub-01_qc.png`
 
-## Configuration (code/plot_config.yaml)
+## Decoding
 
-- **Time Window:**  
-  Crop data to relevant components (e.g., `-0.2` to `1.0` s).
+The decoding pipeline uses the preprocessed epochs and evaluates the enabled
+classifiers with repeated stratified cross-validation and super-trial
+averaging.
 
-- **Channel Selection:**  
-  Set `picks`: `"eeg"` for a butterfly plot (all channels) or a list `["Fz", "Pz"]` for specific traces.
+Current models:
 
-- **Variability:**  
-  Toggle between `mean` (clean line) or `sem` (standard error shadow).
+- `lda`
+- `svm`
+- `logreg`
+- `ridge`
+- `mlp`
 
-- **Output:**  
-  Figures saved to `data/derivatives/figures/` (e.g., `erp_joint_plot.png`).
+The model set and their hyperparameters are defined in
+`code/config_decoding.yaml`.
 
----
+The decoding script writes one CSV per subject with both accuracy results and,
+for linear models, Haufe-pattern exports.
 
-## Decoding Analysis
+## Plotting
 
-Run a comprehensive multivariate pattern analysis (MVPA) pipeline to decode decision-making processes. This module replicates the methodology of Moerel et al. (2025) (using LDA and time-binning) and extends it with modern Deep Learning approaches (PyTorch).
+`code/03_plot_decoding_results.py` creates the final figures from the decoding
+outputs:
 
-### Bash
+- grand-average model comparison,
+- per-model time-resolved decoding figures,
+- winner-vs-loser figures,
+- and Haufe topographies for models that provide them.
 
-```bash
-# Run advanced decoding pipeline
-uv run code/decoding.py
-```
+The plotting script reads the same configuration file as the decoding script so
+that the figures stay aligned with the chosen analysis settings.
 
-### Key Features
-1. 4-Dimensional Decoding: Automatically loops through four prediction targets defined in the paper:
-   - Current Self: What did I play?
-   - Current Other: What did the opponent play?
-   - Previous Self: What did I play in the last round? (Memory/Strategy)
-   - Previous Other: What did the opponent play in the last round?
-2. Methodological Replication: Resamples data to 4 Hz (250 ms bins) to match the original study's signal-to-noise optimization.
-3. Model Zoo: Compare classical vs. deep learning models on the same data.
-   - LDA: Linear Discriminant Analysis (Paper standard).
-   - MLP: Multi-Layer Perceptron (Scikit-Learn).
-   - EEGNet_slidingWindow: A custom EEGNet-like architecture integrated into MNE.
-   - Logistic Regression: Whole-trial baseline.
-4. Statistical Evaluation: Performs time-point-by-time-point t-tests against chance level (33.3%) and marks significant clusters in plots
+## Ranking analysis
 
-### Configuraion (code/decoding_config.yaml)
-- Experiment Targets: Define the columns to decode and trial shifts (e.g., shift: 1 for previous trial).
-    ```yaml
-    targets:
-      previous_self:
-        column: "player1_resp"
-        shift: 1  # Decodes trial N-1
-    ```
-- Models: Enable/Disable specific classifiers (e.g., set pytorch_net: enabled: true).
-- Statistics: Set alpha (default 0.05) and chance_level (0.33).
+`code/additional_analysis/rank_model_runs.py` summarizes the decoding results
+across preprocessing variants and ranks the model/run combinations by a robust
+area-over-chance score.
 
-### Output
-Results are saved in data/derivatives/decoding_results/, organized by target (e.g., current_self/):
-- comparison_plot.png: Overlay of all active models with shaded standard deviation.
-- result_{model}.png: Individual model performance with significant time points marked (black dots).
-- evaluation_report.csv: Raw accuracy, standard deviation, and p-values for every time point.
+It can rank a limited number of top entries or all available combinations.
 
-  Note: If real labels are missing (e.g., during testing), the pipeline automatically detects this and falls back to Dummy Data generation, tagging all outputs with DUMMY_ prefixes to prevent confusion.
+## Output folders
 
+Typical outputs are stored under:
+
+- `data/derivatives*` — preprocessing variants and intermediate outputs
+- `data/results_decoding/` — decoding CSV files and ranking outputs
+- `figures/` — final figures used in the report
 
 ## Troubleshooting
 
-**All epochs dropped:**
+- If the scripts cannot find the input data, make sure the local `data/`
+  folder exists and contains the BIDS files.
+- If decoding is slow, reduce the number of repeats or disable expensive
+  models in `code/config_decoding.yaml`.
+- If preprocessing fails, verify that the raw file names and subject folders
+  match the expected BIDS structure.
 
-- `amplitude_reject_threshold_uv` too strict (try 300-500 µV or disable)
+## Further reading
 
-**Missing files:**
+- MNE-Python: https://mne.tools/stable/index.html
+- Configuration files: `code/config_preprocessing.yaml` and
+  `code/config_decoding.yaml`
 
-- Check `participants.tsv` for bad channel lists
-- Verify raw BDF files exist at `raw_template` path
+## Pipeline overview
 
-**Slow processing:**
-
-- Disable `ica_enabled` for faster runs
-- Reduce `ica_n_components` (default: 20)
-
-## Alternative: Pip Installation
-
-```bash
-pip install -r requirements.txt
-python code/preprocessing.py
+```mermaid
+flowchart TD
+    A[Local data/ folder with BIDS EEG files] --> B[01_preprocess.py]
+    B --> C[Preprocessed FIF epochs in data/]
+    C --> D[02_decoding.py]
+    D --> E[Decoding CSVs and Haufe patterns in results_decoding/]
+    E --> F[03_plot_decoding_results.py]
+    F --> G[Final figures in figures/]
+    E --> H[rank_model_runs.py]
+    H --> I[Model/run ranking CSV and top-N plots]
+    J[run_decoding_all_derivatives.sh] --> D
+    J --> F
 ```
-
-## Further Reading
-
-- **Original detailed docs:** See `README_OLD.md` for experiment details
-- **MNE-Python:** https://mne.tools/stable/index.html
-- **Config reference:** All options documented in `code/preprocess_config.yaml`

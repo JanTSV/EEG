@@ -6,8 +6,8 @@
 paths:
   bids_root: "/home/miliczpl/MySSD/Code/EEG/data"
   deriv_root: "/home/miliczpl/MySSD/Code/EEG/data/derivatives__0.1-100.0hz_notch50+100_no_ica"
-  results_dir: "/home/miliczpl/MySSD/Code/EEG/data/derivatives__0.1-100.0hz_notch50+100_no_ica/results_decoding"
-  figures_dir: "/home/miliczpl/MySSD/Code/EEG/data/derivatives__0.1-100.0hz_notch50+100_no_ica/figures_decoding"
+  results_dir: "/home/miliczpl/MySSD/Code/EEG/data/derivatives__0.1-100.0hz_notch50+100_no_ica/results_decoding_mlp_2"
+  figures_dir: "/home/miliczpl/MySSD/Code/EEG/data/derivatives__0.1-100.0hz_notch50+100_no_ica/figures_decoding_mlp_2"
 
 subjects:
   # Liste aller validen Subjects (Bad subjects 10, 23, 24 ausgeschlossen)
@@ -81,24 +81,18 @@ targets:
 models:
   lda:
     enabled: true
-    use_sliding_window: false  # LDA is so fast, manual loop or sliding window both work instantly
   svm:
     enabled: true
-    use_sliding_window: false
     C: 1.0
     kernel: "linear"
   logreg:
     enabled: true
-    use_sliding_window: false  # False uses the manual bin loop, which avoids MNE wrapper overhead for fast models
     C: 1.0
   ridge:
     enabled: true
-    use_sliding_window: false  # Very fast, robust to highly correlated EEG channels
     alpha: 1.0
-  torch_mlp:
-    enabled: false
-    use_sliding_window: true   # Compare simple NN approach
-    hidden_dim: 64
-    epochs: 50
-    learning_rate: 0.001
-    batch_size: 32
+  # Simple MLP on single-bin input for fair comparison with linear models
+  mlp:
+    enabled: true
+    hidden_layer_sizes: [64, 32]
+    max_iter: 1000
