@@ -15,13 +15,35 @@ go.
 ## Important
 
 The repository does not ship the EEG data itself.
-For the pipeline to work, you must place the BIDS input files in a data/ folder at the projects root! (by using datalad in the project root).
+For the pipeline to work, you must place the BIDS input files in a local data/
+folder at the project root.
+
+## Getting the data
+
+The easiest way to match the expected structure is to install the OpenNeuro
+dataset into the project root and use data/ as the local dataset directory.
+This keeps the BIDS layout identical to what the scripts expect while letting
+DataLad fetch files on demand.
+
+Example:
+
+```bash
+# from the repository root
+datalad install -d data https://github.com/OpenNeuroDatasets/ds006761
+cd data
+datalad get .
+```
+
+If you already have the dataset elsewhere, you can also copy or symlink it into
+data/ as long as the BIDS structure remains the same.
 
 ## Requirements
 
 - Python 3.11+
 - [uv](https://github.com/astral-sh/uv) recommended, or pip
 - Local EEG dataset in the expected BIDS layout inside `data/`
+- OpenNeuro dataset ds006761 installed into `data/` or provided with the same
+  BIDS structure
 
 ## Main scripts
 
